@@ -2,17 +2,44 @@
 
 Hammond IT Consulting — Blake Hammond Realty
 
-One local command that:
+[![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
 
-1. Pulls [CNPA public notices](https://www.capublicnotice.com) for
-   **NOTICE OF PETITION TO ADMINISTER ESTATE** in **Placer County**
-2. Looks up each `S-PR` number on
-   [Placer eCourt Public](https://webportal.placerco.org/eCourtPublic/?q=node/48)
-   using a full-year **Filed** date range
-3. Writes a dossier PDF in the same layout as the sample daily feed
-4. Optionally emails the digest with the PDF attached
+Pulls [CNPA public notices](https://www.capublicnotice.com) for **NOTICE OF PETITION TO ADMINISTER ESTATE** in **Placer County**, looks up each `S-PR` number on [Placer eCourt Public](https://webportal.placerco.org/eCourtPublic/?q=node/48), writes a dossier PDF, and can email the digest.
+
+This GitHub repo can be added in **HACS** (Home Assistant integration) and in the **Add-on Store** (Supervisor add-on). Use one or the other, not both, or you will scrape twice.
 
 A published petition is **not** proof that a house is in the estate.
+
+## Install with HACS
+
+1. HACS → Integrations → ⋮ → **Custom repositories**
+2. Repository: `https://github.com/plex/placer-probate-monitor`
+3. Type: **Integration**
+4. Download **Placer Probate Monitor**, then restart Home Assistant
+5. Settings → Devices & services → **Add integration** → Placer Probate Monitor
+6. Set recipients, SMTP, frequency (hourly / daily / weekdays / weekly / monthly), and search options
+
+After that, configure it from the integration’s **Configure** menu. Services:
+
+- `placer_probate_monitor.run_now`
+- `placer_probate_monitor.test_email`
+
+Reports are stored under `/config/placer_probate_monitor/reports` (or your Home Assistant config folder).
+
+If your GitHub URL is different, paste that URL instead.
+
+## Install as a Home Assistant add-on
+
+Supervisor looks for `repository.yaml` at the repo root and `config.yaml` in a subfolder.
+
+1. Settings → Add-ons → Add-on Store → ⋮ → **Repositories**
+2. Add `https://github.com/plex/placer-probate-monitor`
+3. Install **Placer Probate Monitor**, start it, **Open Web UI**
+4. Recipients, SMTP, schedule, and search knobs are in that UI
+
+Local / unpublished install: copy the repo to `/addons/placer-probate-monitor` on the host, then Check for updates and install from **Local add-ons**.
+
+The add-on listens on ingress port 8099. Reports land in `/data/reports` inside the container.
 
 ## What you get per estate
 
@@ -27,7 +54,7 @@ From the newspaper notice:
 
 From the court portal (same session as a manual search):
 
-- Case Summary URL (`?q=node/45/…`)
+- Case search on [Placer eCourt Public](https://webportal.placerco.org/eCourtPublic/?q=node/48) (Case Summary deep links 404 unless you search first)
 - Official caption and filing date
 - Parties (petitioner, decedent, objector, administrator)
 - Next hearing and prior hearings
@@ -35,7 +62,7 @@ From the court portal (same session as a manual search):
 - Court-assigned counsel
 - Filing / appearance fees
 
-## Setup
+## CLI setup
 
 ```bash
 cd placer-probate-monitor
@@ -50,7 +77,8 @@ Edit `.env` only if you want email. Gmail needs an
 
 ## Run
 
-Print + write files, do not email, do not update seen-cases:
+Print + write files, do not email, do not update seen-cases
+(NEW vs SEEN is computed in memory):
 
 ```bash
 python3 placer_probate_monitor.py --dry-run
@@ -81,7 +109,11 @@ Outputs in `data/reports/`:
 - `notices-YYYY-MM-DD.json`
 - `report-YYYY-MM-DD.html` / `.txt`
 
-## Daily schedule
+## Home Assistant add-on
+
+This repo is also a Supervisor add-on. Prefer **Install as a Home Assistant add-on** above (GitHub repository URL). The Ingress UI covers recipients, SMTP, frequency, timezone, lookback, Run now, and test email.
+
+## Daily schedule (CLI)
 
 Linux / macOS cron (8:30 a.m. Pacific):
 
@@ -101,8 +133,8 @@ Windows Task Scheduler: start program
 The public Case Summary URL 404s if you open it cold.
 The script:
 
-1. GET the search form
-2. POST case number + Filed `01/01/{year}`–`12/31/{year}`
+1. GET the search form (and abort if expected Drupal field names are missing)
+2. POST case number + Filed `01/01/{year-2}`–`12/31/{year+1}`
 3. Read filing date / next event / Case Summary link
 4. GET that link **in the same cookie session**
 5. Pause ~1.2 seconds between cases
@@ -113,7 +145,11 @@ Do not raise the rate. One run per day is enough.
 
 | File | Role |
 |---|---|
-| `placer_probate_monitor.py` | Daily entry point |
+| `hacs.json` | HACS custom-repository metadata |
+| `custom_components/placer_probate_monitor/` | Home Assistant integration (HACS) |
+| `repository.yaml` | Supervisor add-on repository index |
+| `placer_probate_monitor/` | Home Assistant add-on (Dockerfile, Ingress UI) |
+| `placer_probate_monitor.py` | CLI entry point |
 | `ecourt_client.py` | Placer portal search + Case Summary parse |
 | `pdf_report.py` | Dossier PDF |
 | `make_sample_pdf.py` | Frozen 16 Sep 2026 sample (optional) |

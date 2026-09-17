@@ -7,7 +7,6 @@ from pathlib import Path
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
-from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
 from reportlab.platypus import (
     KeepTogether,
@@ -19,16 +18,18 @@ from reportlab.platypus import (
     TableStyle,
 )
 
-OUT = Path(__file__).resolve().parent / "data/reports/Placer-Probate-Daily-Feed-2026-09-16.pdf"
+from pdf_report import (
+    CREAM,
+    GOLD,
+    LINE,
+    NAVY,
+    PALE,
+    _footer as footer,
+    _rl_link,
+    _styles as styles,
+)
 
-NAVY = colors.HexColor("#1B2A4A")
-STEEL = colors.HexColor("#2F4F6F")
-GOLD = colors.HexColor("#C4A35A")
-CREAM = colors.HexColor("#F6F1E6")
-PALE = colors.HexColor("#EEF3F8")
-GRAY = colors.HexColor("#5C6570")
-LINE = colors.HexColor("#D5D0C6")
-ALERT = colors.HexColor("#8B2E2E")
+OUT = Path(__file__).resolve().parent / "data/reports/Placer-Probate-Daily-Feed-2026-09-16.pdf"
 
 CASES = [
     {
@@ -348,43 +349,6 @@ CASES = [
 ]
 
 
-def styles():
-    base = getSampleStyleSheet()
-    return {
-        "kicker": ParagraphStyle("kicker", parent=base["Normal"], fontName="Times-Bold", fontSize=8, textColor=GOLD, spaceAfter=2),
-        "title": ParagraphStyle("title", parent=base["Normal"], fontName="Times-Bold", fontSize=18, textColor=NAVY, leading=22, spaceAfter=2),
-        "sub": ParagraphStyle("sub", parent=base["Normal"], fontName="Times-Italic", fontSize=9.5, textColor=STEEL, spaceAfter=8),
-        "body": ParagraphStyle("body", parent=base["Normal"], fontName="Times-Roman", fontSize=9, leading=12, textColor=NAVY),
-        "small": ParagraphStyle("small", parent=base["Normal"], fontName="Times-Roman", fontSize=8, leading=10.5, textColor=GRAY),
-        "h": ParagraphStyle("h", parent=base["Normal"], fontName="Times-Bold", fontSize=12, textColor=NAVY, spaceBefore=8, spaceAfter=4),
-        "case": ParagraphStyle("case", parent=base["Normal"], fontName="Times-Bold", fontSize=11, textColor=NAVY, leading=14),
-        "label": ParagraphStyle("label", parent=base["Normal"], fontName="Times-Bold", fontSize=8, textColor=STEEL, leading=10),
-        "td": ParagraphStyle("td", parent=base["Normal"], fontName="Times-Roman", fontSize=8, leading=10.5, textColor=NAVY),
-        "th": ParagraphStyle("th", parent=base["Normal"], fontName="Times-Bold", fontSize=7.5, leading=10, textColor=colors.white),
-        "flag": ParagraphStyle("flag", parent=base["Normal"], fontName="Times-Italic", fontSize=8.5, leading=11, textColor=ALERT),
-        "foot": ParagraphStyle("foot", parent=base["Normal"], fontName="Times-Italic", fontSize=8, textColor=GRAY, leading=11),
-        "kpi_n": ParagraphStyle("kpi_n", parent=base["Normal"], alignment=1, fontName="Times-Bold", fontSize=14, textColor=NAVY),
-        "kpi_l": ParagraphStyle("kpi_l", parent=base["Normal"], alignment=1, fontName="Times-Roman", fontSize=7, textColor=STEEL, leading=9),
-    }
-
-
-def footer(canvas, doc):
-    canvas.saveState()
-    canvas.setFillColor(NAVY)
-    canvas.rect(0, letter[1] - 16, letter[0], 16, fill=1, stroke=0)
-    canvas.setFillColor(colors.white)
-    canvas.setFont("Times-Roman", 8)
-    canvas.drawString(36, letter[1] - 11, "Hammond IT Consulting — Blake Hammond Realty  ·  Placer probate feed")
-    canvas.drawRightString(letter[0] - 36, letter[1] - 11, "CONFIDENTIAL")
-    canvas.setFillColor(GOLD)
-    canvas.rect(0, 0, letter[0], 20, fill=1, stroke=0)
-    canvas.setFillColor(NAVY)
-    canvas.setFont("Times-Roman", 7.5)
-    canvas.drawString(36, 7, "Public notices + eCourt public index. Documents are not downloadable. Not a title search.")
-    canvas.drawRightString(letter[0] - 36, 7, f"Page {doc.page}")
-    canvas.restoreState()
-
-
 def cover(s):
     kpis = Table([[
         [Paragraph("9", s["kpi_n"]), Paragraph("UNIQUE ESTATES", s["kpi_l"])],
@@ -404,7 +368,7 @@ def cover(s):
     rows = [header]
     for c in CASES:
         rows.append([
-            Paragraph(f'<link href="{c["url"]}" color="#1A4F8B"><u>{c["case"]}</u></link>', s["td"]),
+            Paragraph(_rl_link(c["url"], c["case"]), s["td"]),
             Paragraph(c["decedent"], s["td"]),
             Paragraph(c["filed"], s["td"]),
             Paragraph(c["hearings"][0].replace("Next: ", ""), s["td"]),
@@ -469,8 +433,8 @@ def case_block(c, s):
         s["case"],
     )
     links = Paragraph(
-        f'Court file: <link href="{c["url"]}" color="#1A4F8B"><u>{c["url"]}</u></link><br/>'
-        f'Published notice: <link href="{c["notice_url"]}" color="#1A4F8B"><u>{c["notice_url"]}</u></link>',
+        f'Court file: {_rl_link(c["url"], c["url"])}<br/>'
+        f'Published notice: {_rl_link(c["notice_url"], c["notice_url"])}',
         s["small"],
     )
     body = kv_table([
