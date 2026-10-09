@@ -59,21 +59,26 @@ def _styles():
     }
 
 
-def _footer(canvas, doc):
-    canvas.saveState()
-    canvas.setFillColor(NAVY)
-    canvas.rect(0, letter[1] - 16, letter[0], 16, fill=1, stroke=0)
-    canvas.setFillColor(colors.white)
-    canvas.setFont("Times-Roman", 8)
-    canvas.drawString(36, letter[1] - 11, "Hammond IT Consulting — Blake Hammond Realty  ·  Placer probate feed")
-    canvas.drawRightString(letter[0] - 36, letter[1] - 11, "CONFIDENTIAL")
-    canvas.setFillColor(GOLD)
-    canvas.rect(0, 0, letter[0], 20, fill=1, stroke=0)
-    canvas.setFillColor(NAVY)
-    canvas.setFont("Times-Roman", 7.5)
-    canvas.drawString(36, 7, "Public notices + eCourt public index. Documents are not downloadable. Not a title search.")
-    canvas.drawRightString(letter[0] - 36, 7, f"Page {doc.page}")
-    canvas.restoreState()
+def _footer_for(county: str):
+    label = f"Hammond IT Consulting — Blake Hammond Realty  ·  {county} probate feed"
+
+    def _footer(canvas, doc):
+        canvas.saveState()
+        canvas.setFillColor(NAVY)
+        canvas.rect(0, letter[1] - 16, letter[0], 16, fill=1, stroke=0)
+        canvas.setFillColor(colors.white)
+        canvas.setFont("Times-Roman", 8)
+        canvas.drawString(36, letter[1] - 11, label)
+        canvas.drawRightString(letter[0] - 36, letter[1] - 11, "CONFIDENTIAL")
+        canvas.setFillColor(GOLD)
+        canvas.rect(0, 0, letter[0], 20, fill=1, stroke=0)
+        canvas.setFillColor(NAVY)
+        canvas.setFont("Times-Roman", 7.5)
+        canvas.drawString(36, 7, "Public notices + eCourt public index. Documents are not downloadable. Not a title search.")
+        canvas.drawRightString(letter[0] - 36, 7, f"Page {doc.page}")
+        canvas.restoreState()
+
+    return _footer
 
 
 def _badge(row: dict) -> str:
@@ -103,13 +108,24 @@ def _flags(row: dict) -> str:
     if notice_pet and notice_pet.split()[-1] and notice_pet.split()[-1] not in portal_parties:
         bits.append("Published petitioner name may not match the portal party list.")
     if not row.get("found"):
-        bits.append("No eCourt hit for this case number in the filing-year window.")
+        bits.append("No court-portal hit for this case number.")
+    if row.get("extra_flag"):
+        bits.append(str(row["extra_flag"]))
     if not bits:
         bits.append("Uncontested on the public register so far. Confirm property separately.")
     return " ".join(bits)
 
 
-def build_pdf(rows: list[dict], out_path: Path, run_date: date, start: date, end: date) -> Path:
+def build_pdf(
+    rows: list[dict],
+    out_path: Path,
+    run_date: date,
+    start: date,
+    end: date,
+    county: str = "Placer",
+    source_note: str | None = None,
+    intro: str | None = None,
+) -> Path:
     s = _styles()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     contested = sum(
@@ -170,14 +186,17 @@ def build_pdf(rows: list[dict], out_path: Path, run_date: date, start: date, end
         Paragraph("HAMMOND IT CONSULTING  ·  BLAKE HAMMOND REALTY", s["kicker"]),
         Paragraph("Daily Probate Petition Feed — Case Dossiers", s["title"]),
         Paragraph(
-            f"{run_date.strftime('%A, %B %-d, %Y')}  ·  Placer County  ·  "
+            f"{run_date.strftime('%A, %B %-d, %Y')}  ·  {county} County  ·  "
             f"CNPA window {start.isoformat()} to {end.isoformat()}",
             s["sub"],
         ),
         Paragraph(
-            "Each estate merges the published Notice of Petition to Administer Estate with the "
-            "public eCourt Case Summary. Register PDFs are titles only — the public portal does not allow download. "
-            "A petition is not proof that real property is in the estate.",
+            intro
+            or (
+                "Each estate merges the published Notice of Petition to Administer Estate with the "
+                "public eCourt Case Summary. Register PDFs are titles only — the public portal does not allow download. "
+                "A petition is not proof that real property is in the estate."
+            ),
             s["body"],
         ),
         Spacer(1, 8),
@@ -193,7 +212,7 @@ def build_pdf(rows: list[dict], out_path: Path, run_date: date, start: date, end
         notice = r.get("notice_url") or ""
         head = Paragraph(
             f'{_esc(r.get("case_number"))}  ·  {_esc(r.get("caption") or r.get("decedent"))}<br/>'
-            f'<font size="8" color="#2F4F6F">{_badge(r)}  ·  {_esc(r.get("case_type") or r.get("status") or "Placer probate")}</font>',
+            f'<font size="8" color="#2F4F6F">{_badge(r)}  ·  {_esc(r.get("case_type") or r.get("status") or f"{county} probate")}</font>',
             s["case"],
         )
         links = []
@@ -239,9 +258,12 @@ def build_pdf(rows: list[dict], out_path: Path, run_date: date, start: date, end
         ]))
 
     story.append(Paragraph(
-        "Sources: capublicnotice.com keyword search in Placer County; "
-        "webportal.placerco.org/eCourtPublic case search with a full-year Filed range. "
-        "Run once per day. Do not scrape the court portal in a tight loop.",
+        source_note
+        or (
+            "Sources: capublicnotice.com keyword search in Placer County; "
+            "webportal.placerco.org/eCourtPublic case search with a full-year Filed range. "
+            "Run once per day. Do not scrape the court portal in a tight loop."
+        ),
         s["foot"],
     ))
 
@@ -252,8 +274,9 @@ def build_pdf(rows: list[dict], out_path: Path, run_date: date, start: date, end
         rightMargin=0.5 * inch,
         topMargin=0.5 * inch,
         bottomMargin=0.42 * inch,
-        title=f"Placer County Daily Probate Feed — {run_date.isoformat()}",
+        title=f"{county} County Daily Probate Feed — {run_date.isoformat()}",
         author="Hammond IT Consulting — Blake Hammond Realty",
     )
-    doc.build(story, onFirstPage=_footer, onLaterPages=_footer)
+    footer = _footer_for(county)
+    doc.build(story, onFirstPage=footer, onLaterPages=footer)
     return out_path
