@@ -124,3 +124,28 @@ Do not raise the rate. One run per day is enough.
 - No inventory / appraisal and no APN appear on these pages.
 - CNPA only has papers that upload. A filing with no published notice will not show up here.
 - If eCourt HTML changes, `ecourt_client.py` is the file to adjust.
+
+## Sacramento County
+
+Second source, same dossier. Run:
+
+```bash
+python3 sacramento_probate_monitor.py --dry-run
+python3 sacramento_probate_monitor.py --no-email
+```
+
+Outputs land in `data/reports/sacramento/` (`Sacramento-Probate-Daily-Feed-YYYY-MM-DD.pdf`, `sacramento-dossiers-YYYY-MM-DD.json`, and the text/HTML/JSON reports). Seen cases are tracked in `data/seen_cases_sacramento.json`, separate from Placer.
+
+What is different from Placer:
+
+| | Placer | Sacramento |
+|---|---|---|
+| Case number | `S-PR-0000000` | `26PR######` (year + `PR` + six digits). Older `34-YYYY-…` numbers are kept if an ad uses one. |
+| CNPA query | Exact phrase `NOTICE OF PETITION TO ADMINISTER ESTATE` | That exact phrase drops ads the index still returns for `NOTICE OF PETITION`. The shorter query is used, and a card is kept only when the text is a petition to administer an estate. |
+| Notice text | The search card usually contains the full ad | Sacramento Bee and Observer cards are cut at about 200 characters. The full ad is read from `/advert/-{id}` before parsing. Observer HTML also glues words (`TOADMINISTER`, `PetitionerMichael`); those spaces are restored before parsing. Folsom Telegraph cards are already full. |
+| Ad wording | `CASE NO.`, `filed by:`, `Phone No.:`, numbered `7. IF YOU OBJECT` | Also `CASE NUMBER`, `filed by` with no colon, `Telephone:`, and a multiline `Date:` / `Time:` / `Dept:` hearing. |
+| Court site | Tyler eCourt Public. Search, then open the Case Summary in the same session. Filed date range is required. | Journal Technologies public portal. Case-number search is `node/429` (no filed-date range). The result link `node/430/{id}` is documents-only and 404s if opened cold. The full summary is `node/397/{id}` (parties, hearings, register, document titles, probate notes). |
+| Fees | Invoice lines on the case summary | No fee ledger on the public summary. The PDF fee row is blank. |
+| Documents | Titles only; the public site does not allow download | Titles only in this feed. The portal can show images; they are not downloaded. |
+
+The PDF, text digest, HTML table, and dossier JSON use the same fields as Placer: decedent, petitioner, hearing, will / IAEA, counsel, parties, hearings, document titles, and the court link.
