@@ -7,6 +7,10 @@ Hammond IT Consulting — Blake Hammond Realty
 
 Pulls [CNPA public notices](https://www.capublicnotice.com) for **NOTICE OF PETITION TO ADMINISTER ESTATE** in **Placer County**, looks up each `S-PR` number on [Placer eCourt Public](https://webportal.placerco.org/eCourtPublic/?q=node/48), writes a dossier PDF, and can email the digest.
 
+**Sacramento County** is a live datasource on the same job. Set the county to Sacramento. CNPA is searched for **NOTICE OF PETITION** and a card is kept only when the body contains **PETITION TO ADMINISTER ESTATE**. Case numbers are `YYPR######`. The court lookup is the logged-out Sacramento public summary (`node/397` on the Journal Technologies portal). That URL is stored as-is and is not rewritten to Placer `node/45`. Petition PDFs and confidential **Not Viewable** documents are not downloaded, and no court password is stored.
+
+Follow Up Boss tags: Placer sends `probate`. Sacramento sends `probate` and `sacramento` beside it. Person updates call `PUT /v1/people/{id}?mergeTags=true` whenever tags are sent, so tags already on the contact are kept.
+
 This GitHub repo can be added in **HACS** as a custom **integration**, or in the **Add-on Store** as a Supervisor add-on repository. Use one or the other, not both, or you will scrape twice.
 
 HACS does not install Home Assistant add-ons. The add-on is installed from Supervisor, not from HACS.
@@ -155,6 +159,8 @@ Do not raise the rate. One run per day is enough.
 | `placer_probate_monitor/` | Home Assistant add-on (Dockerfile, Ingress UI) |
 | `placer_probate_monitor.py` | CLI entry point |
 | `ecourt_client.py` | Placer portal search + Case Summary parse |
+| `sacramento_portal.py` | Sacramento public summary (`node/397`) and case search (`node/429`) |
+| `datasources.py` | County keywords and Follow Up Boss tags (`probate`, `sacramento`) |
 | `pdf_report.py` | Dossier PDF |
 | `make_sample_pdf.py` | Frozen 16 Sep 2026 sample (optional) |
 

@@ -39,6 +39,7 @@ from .const import (
     DOMAIN,
     FUB_EVENT_TYPES,
 )
+from .datasources import keywords_for_county, normalize_county_name
 from .fub_client import (
     inspect_fub_person,
     mapping_payload,
@@ -48,7 +49,7 @@ from .fub_client import (
     sources_payload,
 )
 
-PANEL_JS_VERSION = "1.3.62"
+PANEL_JS_VERSION = "1.3.63"
 
 WWW = Path(__file__).resolve().parent / "www"
 MAP_HTML = WWW / "fub_map.html"
@@ -282,7 +283,12 @@ class SourcesView(HomeAssistantView):
                 merged[key] = _coerce(key, body[key])
             except (TypeError, ValueError):
                 return self.json({"error": f"Invalid {key}."}, status_code=400)
-        merged["county"] = "Placer"
+        requested = body.get("county") or body.get("source_id")
+        if requested:
+            merged["county"] = normalize_county_name(requested)
+        merged["keywords"] = keywords_for_county(
+            merged.get("county") or "Placer", merged.get("keywords") or ""
+        )
         self.hass.config_entries.async_update_entry(entry, options=merged)
         return self.json(sources_payload(merged))
 

@@ -55,8 +55,9 @@
   </main>
   <script>
     const $ = (id) => document.getElementById(id);
-    let data = { sources: [], placer: {}, fields: [] };
+    let data = { sources: [], placer: {}, fields: [], active: "placer" };
     let current = "placer";
+    let picked = false;
     function flash(msg, ok) {
       const el = $("flash");
       el.textContent = msg;
@@ -73,44 +74,51 @@
         return `<button type="button" class="list ${active}" data-source="${esc(src.id)}">${esc(src.name)} <span class="pill ${pill}">${label}</span></button>`;
       }).join("");
       document.querySelectorAll("[data-source]").forEach((btn) => {
-        btn.onclick = () => { current = btn.dataset.source; renderList(); renderBody(); };
+        btn.onclick = () => { current = btn.dataset.source; picked = true; renderList(); renderBody(); };
       });
     }
     function renderBody() {
       const src = (data.sources || []).find((item) => item.id === current) || {};
       if (src.status !== "live") {
-        $("source-body").innerHTML = `<section class="card"><h2>${esc(src.name)}</h2><p>${esc(src.description)}</p><p class="note">Not importable yet. Placer is live. Sacramento is next, then Nevada County.</p></section>`;
+        $("source-body").innerHTML = `<section class="card"><h2>${esc(src.name)}</h2><p>${esc(src.description)}</p><p class="note">Not importable yet. Placer and Sacramento are live. Nevada County is next.</p></section>`;
         return;
       }
-      const p = data.placer || {};
+      const p = data.settings || data.placer || {};
+      const countyName = src.id === "sacramento" ? "Sacramento" : "Placer";
+      const longKw = '"NOTICE OF PETITION TO ADMINISTER ESTATE"';
+      const shortKw = '"NOTICE OF PETITION"';
+      let keywords = p.keywords || "";
+      if (src.id === "sacramento" && (!keywords || keywords === longKw)) keywords = shortKw;
+      if (src.id === "placer" && !keywords) keywords = longKw;
+      const fields = (data.source_fields && data.source_fields[src.id]) || data.fields || [];
       $("source-body").innerHTML = `
         <section class="card">
-          <h2>Placer County import</h2>
+          <h2>${esc(countyName)} County import</h2>
           <p class="note">${esc(src.description)}</p>
           <div class="row">
             <div><label>Lookback days</label><input id="lookback_days" type="number" min="1" max="120" value="${esc(p.lookback_days ?? 21)}" /></div>
             <div><label>Lookahead days</label><input id="lookahead_days" type="number" min="0" max="120" value="${esc(p.lookahead_days ?? 21)}" /></div>
           </div>
           <div class="row">
-            <div><label>County</label><input value="Placer" disabled /></div>
-            <div><label>Skip eCourt lookups</label><select id="skip_portal"><option value="false">No</option><option value="true">Yes</option></select></div>
+            <div><label>County</label><input id="county" value="${esc(countyName)}" disabled /></div>
+            <div><label>Skip court lookups</label><select id="skip_portal"><option value="false">No</option><option value="true">Yes</option></select></div>
           </div>
-          <label>CNPA keywords</label><input id="keywords" value="${esc(p.keywords || "")}" />
+          <label>CNPA keywords</label><input id="keywords" value="${esc(keywords)}" />
           <div class="row">
             <div><label>Generate PDF</label><select id="generate_pdf"><option value="true">Yes</option><option value="false">No</option></select></div>
             <div><label>eCourt pause (seconds)</label><input id="ecourt_pause_seconds" type="number" step="0.1" value="${esc(p.ecourt_pause_seconds ?? 1.2)}" /></div>
           </div>
           <label>Max CNPA pages</label><input id="max_search_pages" type="number" min="1" max="20" value="${esc(p.max_search_pages ?? 10)}" />
           <div class="actions">
-            <button id="save-source" type="button">Save Placer import</button>
-            <button class="secondary" id="run-source" type="button">Run Placer job</button>
+            <button id="save-source" type="button">Save ${esc(countyName)} import</button>
+            <button class="secondary" id="run-source" type="button">Run ${esc(countyName)} job</button>
           </div>
-          <p class="note">Follow Up Boss verify stays on the Follow Up Boss screen.</p>
+          <p class="note">Saving selects ${esc(countyName)} as the live datasource. Follow Up Boss tags are probate${src.id === "sacramento" ? " and sacramento (merged onto existing tags)" : ""}.</p>
         </section>
         <section class="card" style="margin-top:16px;">
           <h2>Extracted fields</h2>
           <table><thead><tr><th>Field</th><th>From</th><th>Status</th></tr></thead><tbody>
-            ${(data.fields || []).map((field) => `<tr><td><b>${esc(field.label)}</b><div class="note">${esc(field.key)}</div></td><td>${esc(field.source)}</td><td>${field.unavailable ? '<span class="pill off">Not extracted</span>' : '<span class="pill live">Available</span>'}</td></tr>`).join("")}
+            ${fields.map((field) => `<tr><td><b>${esc(field.label)}</b><div class="note">${esc(field.key)}</div></td><td>${esc(field.source)}</td><td>${field.unavailable ? '<span class="pill off">Not extracted</span>' : '<span class="pill live">Available</span>'}</td></tr>`).join("")}
           </tbody></table>
         </section>`;
       $("skip_portal").value = String(!!p.skip_portal);
@@ -120,6 +128,7 @@
     }
     async function load() {
       data = await (await fetch("api/sources")).json();
+      if (!picked) current = data.active || "placer";
       renderList();
       renderBody();
     }
@@ -132,18 +141,20 @@
         generate_pdf: $("generate_pdf").value === "true",
         ecourt_pause_seconds: Number($("ecourt_pause_seconds").value),
         max_search_pages: Number($("max_search_pages").value),
-        county: "Placer",
+        county: ($("county") && $("county").value) || "Placer",
       };
       const res = await fetch("api/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       const out = await res.json();
-      flash(res.ok ? "Placer import settings saved." : (out.error || "Save failed"), res.ok);
+      flash(res.ok ? `${body.county} import settings saved.` : (out.error || "Save failed"), res.ok);
+      picked = false;
       await load();
     }
     async function runSource() {
-      flash("Placer job started…", true);
+      const countyName = ($("county") && $("county").value) || "Placer";
+      flash(`${countyName} job started…`, true);
       const res = await fetch("api/run", { method: "POST" });
       const out = await res.json();
-      flash(out.ok ? "Placer job finished." : (out.error || out.log_tail || "Run failed"), !!out.ok);
+      flash(out.ok ? `${countyName} job finished.` : (out.error || out.log_tail || "Run failed"), !!out.ok);
     }
     load().catch((err) => flash(String(err), false));
   </script>

@@ -112,6 +112,10 @@ def save_settings(incoming: dict) -> dict:
     for key in DEFAULTS:
         if key in incoming:
             current[key] = incoming[key]
+    from datasources import keywords_for_county, normalize_county_name
+
+    current["county"] = normalize_county_name(current.get("county"))
+    current["keywords"] = keywords_for_county(current.get("county"), current.get("keywords"))
     rec = current.get("recipients") or []
     if isinstance(rec, str):
         rec = [x.strip() for x in rec.replace(";", ",").split(",") if x.strip()]
@@ -235,9 +239,12 @@ def apply_env(settings: dict) -> None:
     os.environ["MAIL_FROM"] = str(settings.get("mail_from") or settings.get("smtp_user") or "")
     os.environ["MAIL_TO"] = ",".join(recipients)
     os.environ["PROBATE_TZ"] = str(settings.get("timezone") or "America/Los_Angeles")
-    os.environ["PROBATE_COUNTY"] = str(settings.get("county") or "Placer")
-    os.environ["PROBATE_KEYWORDS"] = str(
-        settings.get("keywords") or '"NOTICE OF PETITION TO ADMINISTER ESTATE"'
+    county = str(settings.get("county") or "Placer")
+    os.environ["PROBATE_COUNTY"] = county
+    from datasources import keywords_for_county
+
+    os.environ["PROBATE_KEYWORDS"] = keywords_for_county(
+        county, str(settings.get("keywords") or "")
     )
     os.environ["PROBATE_MAX_PAGES"] = str(int(settings.get("max_search_pages") or 10))
     os.environ["ECOURT_PAUSE"] = str(float(settings.get("ecourt_pause_seconds") or 1.2))

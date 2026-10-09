@@ -125,8 +125,16 @@ def apply_env(
     )
     os.environ["MAIL_TO"] = ",".join(recipients)
     os.environ["PROBATE_TZ"] = str(settings.get(CONF_TIMEZONE) or "America/Los_Angeles")
-    os.environ["PROBATE_COUNTY"] = str(settings.get(CONF_COUNTY) or "Placer")
-    os.environ["PROBATE_KEYWORDS"] = str(settings.get(CONF_KEYWORDS) or DEFAULTS[CONF_KEYWORDS])
+    county = str(settings.get(CONF_COUNTY) or "Placer")
+    os.environ["PROBATE_COUNTY"] = county
+    try:
+        from .datasources import keywords_for_county
+    except ImportError:
+        from datasources import keywords_for_county
+
+    os.environ["PROBATE_KEYWORDS"] = keywords_for_county(
+        county, str(settings.get(CONF_KEYWORDS) or DEFAULTS[CONF_KEYWORDS])
+    )
     os.environ["PROBATE_MAX_PAGES"] = str(int(settings.get(CONF_MAX_PAGES) or 10))
     os.environ["ECOURT_PAUSE"] = str(float(settings.get(CONF_ECOURT_PAUSE) or 1.2))
     os.environ["FUB_ENABLED"] = "1" if settings.get(CONF_FUB_ENABLED) else "0"
@@ -290,7 +298,8 @@ def run_monitor_job(hass: HomeAssistant, settings: dict) -> dict:
         from job_progress import clear_progress, report_progress
 
     clear_progress()
-    report_progress("start", "Starting Placer job…")
+    county_name = str(settings.get(CONF_COUNTY) or "Placer")
+    report_progress("start", f"Starting {county_name} job…")
     reports = data_dir / "reports"
     reports.mkdir(parents=True, exist_ok=True)
     cmd = [
