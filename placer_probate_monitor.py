@@ -628,6 +628,10 @@ def main() -> int:
     if not args.skip_portal:
         print("Looking up each case on Placer eCourt Public…")
         rows = enrich_notices(unique, year=start.year)
+    from datasources import stamp_fub_tags
+
+    rows = stamp_fub_tags(rows, "Placer")
+    if not args.skip_portal:
         (out_dir / f"dossiers-{stamp}.json").write_text(json.dumps(rows, indent=2))
     if not args.no_pdf:
         from pdf_report import build_pdf

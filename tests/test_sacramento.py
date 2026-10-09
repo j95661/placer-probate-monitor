@@ -188,6 +188,17 @@ class NoticeParseTests(unittest.TestCase):
         self.assertIn("PLACER HERALD", fields["publication_line"])
 
 
+class FubTagTests(unittest.TestCase):
+    def test_sacramento_adds_tag_beside_probate(self):
+        from datasources import fub_tags, stamp_fub_tags
+
+        self.assertEqual(fub_tags("Placer"), ["probate"])
+        self.assertEqual(fub_tags("sacramento"), ["probate", "sacramento"])
+        rows = stamp_fub_tags([{"case_number": "26PR002445"}], "Sacramento")
+        self.assertEqual(rows[0]["tags"], ["probate", "sacramento"])
+        self.assertIn("probate", rows[0]["tags"])
+
+
 class PortalParseTests(unittest.TestCase):
     def test_search_hit(self):
         hit = _parse_search(SEARCH, "26PR001581")

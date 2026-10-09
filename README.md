@@ -149,3 +149,22 @@ What is different from Placer:
 | Documents | Titles only; the public site does not allow download | Titles only in this feed. The portal can show images; they are not downloaded. |
 
 The PDF, text digest, HTML table, and dossier JSON use the same fields as Placer: decedent, petitioner, hearing, will / IAEA, counsel, parties, hearings, document titles, and the court link.
+
+## Datasource for Home Assistant / Follow Up Boss
+
+`datasources.collect_leads` is the import the Home Assistant and Follow Up Boss app should call. It does not email and it does not update the seen-case tracker.
+
+```python
+from datasources import collect_leads
+
+leads = collect_leads("Sacramento", lookback_days=21)
+```
+
+Follow Up Boss tags on each row:
+
+| County | `tags` |
+|---|---|
+| Placer | `probate` |
+| Sacramento | `probate`, `sacramento` |
+
+`probate` stays the existing tag. `sacramento` is added beside it, not instead of it. When the parent app writes the person, merge the tags (`mergeTags=true` on `PUT /v1/people/{id}`). A tag update without that flag replaces every tag already on the contact.
