@@ -1342,6 +1342,39 @@ class PlacerProbateFubPanel extends HTMLElement {
 customElements.define("placer-probate-sources-panel", PlacerProbateSourcesPanel);
 customElements.define("placer-probate-fub-panel", PlacerProbateFubPanel);
 
+function ppmListingDocs(row) {
+  const docs = [];
+  const push = (label, url) => {
+    const href = String(url || "").trim();
+    if (!href || !/^https?:\/\//i.test(href)) return;
+    docs.push({ label: label || "Document", url: href });
+  };
+  (row.documents || []).forEach((doc) => {
+    if (typeof doc === "string") push("Document", doc);
+    else if (doc) push(doc.label || doc.name || "Document", doc.url || doc.href);
+  });
+  push("DE-111", row.de111_url);
+  push("DE-147", row.de147_url);
+  const seen = new Set();
+  return docs.filter((doc) => {
+    if (seen.has(doc.url)) return false;
+    seen.add(doc.url);
+    return true;
+  });
+}
+
+function ppmListingDocText(row) {
+  return ppmListingDocs(row).map((doc) => doc.label + " " + doc.url).join(" ");
+}
+
+function ppmListingDocCell(row) {
+  const docs = ppmListingDocs(row);
+  if (!docs.length) return "—";
+  return docs.map((doc) =>
+    `<div><a href="${ppmEsc(doc.url)}" target="_blank" rel="noopener">${ppmEsc(doc.label)}</a><div class="ppm-note">${ppmEsc(doc.url)}</div></div>`
+  ).join("");
+}
+
 class PlacerProbateListingsPanel extends HTMLElement {
   constructor() {
     super();
@@ -1380,7 +1413,7 @@ class PlacerProbateListingsPanel extends HTMLElement {
       <div class="ppm-wrap">
         <header>
           <h1>Probate listings</h1>
-          <p>Collected Placer cases. Date is the newspaper notice date. Source is the county import. Decedent address is DE-111 item 3.a.(2) when marked, else 3c. Not the “at (place)” death location.</p>
+          <p>Collected Placer cases. Date is the newspaper notice date. Source is the county import. Decedent address is DE-111 item 3.a.(2) when marked, else 3c. Not the “at (place)” death location. Document links use the Nabu Casa remote URL when Home Assistant Cloud is configured.</p>
         </header>
         <main class="ppm-listings">
           <div id="flash" class="ppm-banner"></div>
@@ -1417,6 +1450,7 @@ class PlacerProbateListingsPanel extends HTMLElement {
       const blob = [
         row.case_number, row.date, row.source, row.petitioner, row.decedent,
         row.decedent_address, row.petitioner_address, row.newspaper, row.filed,
+        ppmListingDocText(row),
       ].map((item) => String(item || "").toLowerCase()).join(" ");
       return blob.includes(q);
     });
@@ -1442,6 +1476,7 @@ class PlacerProbateListingsPanel extends HTMLElement {
         <td>${ppmEsc(row.petitioner || "—")}<div class="ppm-note">${ppmEsc(row.petitioner_address || "")}</div></td>
         <td>${ppmEsc(row.decedent || "—")}</td>
         <td>${ppmEsc(row.decedent_address || "—")}</td>
+        <td>${ppmListingDocCell(row)}</td>
       </tr>`;
     }).join("");
     this._qs("#listing-table").innerHTML = `
@@ -1454,6 +1489,7 @@ class PlacerProbateListingsPanel extends HTMLElement {
             <th>Petitioner</th>
             <th>Decedent</th>
             <th>Decedent address</th>
+            <th>Documents</th>
           </tr>
         </thead>
         <tbody>${body}</tbody>

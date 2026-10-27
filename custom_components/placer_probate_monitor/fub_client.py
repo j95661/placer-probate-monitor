@@ -2078,15 +2078,95 @@ def duties_public_uri(case: str) -> str:
     return form_public_uri(case, "de147")
 
 
-def form_public_uri(case: str, kind: str) -> str:
+def _document_base():
+    try:
+        from . import document_base as module
+    except ImportError:
+        import document_base as module
+
+    return module
+
+
+def configured_form_base(kind: str) -> str:
+    """DE-111 / DE-147 base. A Nabu Casa origin replaces a LAN base."""
     if kind == "de147":
-        base = str(os.environ.get("FUB_DUTIES_BASE_URL") or "").rstrip("/")
+        configured = str(os.environ.get("FUB_DUTIES_BASE_URL") or "").strip()
     else:
-        base = str(os.environ.get("FUB_PETITION_BASE_URL") or "").rstrip("/")
+        configured = str(os.environ.get("FUB_PETITION_BASE_URL") or "").strip()
+    nabu = str(os.environ.get("FUB_NABU_CASA_URL") or "").strip()
+    return _document_base().choose_document_base(nabu, configured)
+
+
+def form_public_uri(case: str, kind: str) -> str:
+    base = configured_form_base(kind).rstrip("/")
     if not base:
         return ""
     safe = petition_safe_case(case)
     return f"{base}/{petition_file_token(case, kind=kind)}/{safe}.pdf"
+
+
+def _publicize_document_url(url: str) -> str:
+    text = str(url or "").strip()
+    if not text:
+        return ""
+    module = _document_base()
+    nabu = str(os.environ.get("FUB_NABU_CASA_URL") or "").strip()
+    configured = str(os.environ.get("FUB_PETITION_BASE_URL") or "").strip()
+    target = module.choose_document_base(nabu, configured)
+    if module.is_nabu_casa_ui_url(target) and module.is_local_or_private_url(text):
+        return module.rewrite_local_document_url(text, target)
+    return text
+
+
+def listing_document_links(row: dict) -> list[dict]:
+    """Public DE-111 / DE-147 links for one probate listing.
+
+    Links that already point at a LAN Home Assistant address are rewritten to
+    the Nabu Casa origin when one is configured. Court-portal download URLs
+    are left alone.
+    """
+    case = case_key(row)
+    links: list[dict] = []
+    seen: set[str] = set()
+
+    def add(label: str, url: str) -> None:
+        raw = str(url or "").strip()
+        if "/api/placer_probate_monitor/" not in raw:
+            return
+        public = _publicize_document_url(raw)
+        if not public:
+            return
+        marker = "/api/placer_probate_monitor/"
+        idx = public.find(marker)
+        key = public[idx:] if idx >= 0 else public
+        if key in seen:
+            return
+        seen.add(key)
+        links.append({"label": label or "Document", "url": public})
+
+    for key, label in (("de111_url", "DE-111"), ("de147_url", "DE-147")):
+        add(label, str(row.get(key) or ""))
+    for doc in row.get("documents") or []:
+        if isinstance(doc, str):
+            add("Document", doc)
+        elif isinstance(doc, dict):
+            add(
+                str(doc.get("label") or doc.get("name") or "Document"),
+                str(doc.get("url") or doc.get("href") or ""),
+            )
+    for doc in row.get("document_files") or []:
+        if not isinstance(doc, dict):
+            continue
+        add(
+            str(doc.get("name") or doc.get("label") or "Document"),
+            str(doc.get("url") or ""),
+        )
+    if case:
+        if not any(item["label"] == "DE-111" for item in links) and _petition_pdf_path(row):
+            add("DE-111", petition_public_uri(case))
+        if not any(item["label"] == "DE-147" for item in links) and _duties_pdf_path(row):
+            add("DE-147", duties_public_uri(case))
+    return links
 
 
 def _petition_pdf_path(row: dict) -> Path | None:

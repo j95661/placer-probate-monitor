@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -49,7 +50,7 @@ from .fub_client import (
     sources_payload,
 )
 
-PANEL_JS_VERSION = "1.3.63"
+PANEL_JS_VERSION = "1.3.64"
 
 WWW = Path(__file__).resolve().parent / "www"
 MAP_HTML = WWW / "fub_map.html"
@@ -560,12 +561,23 @@ class ListingsView(HomeAssistantView):
 
 
 def _listings_payload(hass: HomeAssistant) -> dict:
+    from .document_base import (
+        apply_document_base,
+        is_local_or_private_url,
+        rewrite_local_document_url,
+    )
+    from .fub_client import listing_document_links
     from .placer_probate_monitor import (
         _read_listings_catalog,
         merge_listings,
     )
 
     data_dir = Path(hass.config.path(DOMAIN))
+    os.environ["FUB_PETITION_DOCS_DIR"] = str(data_dir / "reports" / "docs")
+    entry = _entry(hass)
+    if entry:
+        os.environ["FUB_PETITION_TOKEN_SECRET"] = entry.entry_id
+    apply_document_base(hass)
     path = data_dir / "listings.json"
     catalog = _read_listings_catalog(path)
     reports = data_dir / "reports"
@@ -593,7 +605,20 @@ def _listings_payload(hass: HomeAssistant) -> dict:
         ),
         reverse=True,
     )
-    return {"count": len(listings), "listings": listings}
+    nabu = str(os.environ.get("FUB_NABU_CASA_URL") or "")
+    public_rows = []
+    for item in listings:
+        row = dict(item)
+        documents = listing_document_links(row)
+        if documents:
+            row["documents"] = documents
+        if nabu:
+            for key in ("de111_url", "de147_url"):
+                url = str(row.get(key) or "")
+                if url and is_local_or_private_url(url):
+                    row[key] = rewrite_local_document_url(url, nabu)
+        public_rows.append(row)
+    return {"count": len(public_rows), "listings": public_rows}
 
 
 def _register_panel(hass: HomeAssistant, url_path: str, title: str, icon: str, element: str) -> None:
