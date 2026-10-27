@@ -2070,12 +2070,12 @@ def petition_file_token(case: str, secret: str | None = None, *, kind: str = "de
     ).hexdigest()[:32]
 
 
-def petition_public_uri(case: str) -> str:
-    return form_public_uri(case, "de111")
+def petition_public_uri(case: str, nabu_base: str | None = None) -> str:
+    return form_public_uri(case, "de111", nabu_base)
 
 
-def duties_public_uri(case: str) -> str:
-    return form_public_uri(case, "de147")
+def duties_public_uri(case: str, nabu_base: str | None = None) -> str:
+    return form_public_uri(case, "de147", nabu_base)
 
 
 def _document_base():
@@ -2087,38 +2087,38 @@ def _document_base():
     return module
 
 
-def configured_form_base(kind: str) -> str:
+def configured_form_base(kind: str, nabu_base: str | None = None) -> str:
     """DE-111 / DE-147 base. A Nabu Casa origin replaces a LAN base."""
     if kind == "de147":
         configured = str(os.environ.get("FUB_DUTIES_BASE_URL") or "").strip()
     else:
         configured = str(os.environ.get("FUB_PETITION_BASE_URL") or "").strip()
-    nabu = str(os.environ.get("FUB_NABU_CASA_URL") or "").strip()
+    nabu = str(nabu_base or os.environ.get("FUB_NABU_CASA_URL") or "").strip()
     return _document_base().choose_document_base(nabu, configured)
 
 
-def form_public_uri(case: str, kind: str) -> str:
-    base = configured_form_base(kind).rstrip("/")
+def form_public_uri(case: str, kind: str, nabu_base: str | None = None) -> str:
+    base = configured_form_base(kind, nabu_base).rstrip("/")
     if not base:
         return ""
     safe = petition_safe_case(case)
     return f"{base}/{petition_file_token(case, kind=kind)}/{safe}.pdf"
 
 
-def _publicize_document_url(url: str) -> str:
+def _publicize_document_url(url: str, nabu_base: str | None = None) -> str:
     text = str(url or "").strip()
     if not text:
         return ""
     module = _document_base()
-    nabu = str(os.environ.get("FUB_NABU_CASA_URL") or "").strip()
+    nabu = str(nabu_base or os.environ.get("FUB_NABU_CASA_URL") or "").strip()
     configured = str(os.environ.get("FUB_PETITION_BASE_URL") or "").strip()
     target = module.choose_document_base(nabu, configured)
-    if module.is_nabu_casa_ui_url(target) and module.is_local_or_private_url(text):
-        return module.rewrite_local_document_url(text, target)
+    if module.is_nabu_casa_ui_url(target):
+        return module.public_document_url(text, target)
     return text
 
 
-def listing_document_links(row: dict) -> list[dict]:
+def listing_document_links(row: dict, nabu_base: str | None = None) -> list[dict]:
     """Public DE-111 / DE-147 links for one probate listing.
 
     Links that already point at a LAN Home Assistant address are rewritten to
@@ -2133,7 +2133,7 @@ def listing_document_links(row: dict) -> list[dict]:
         raw = str(url or "").strip()
         if "/api/placer_probate_monitor/" not in raw:
             return
-        public = _publicize_document_url(raw)
+        public = _publicize_document_url(raw, nabu_base)
         if not public:
             return
         marker = "/api/placer_probate_monitor/"
@@ -2163,10 +2163,52 @@ def listing_document_links(row: dict) -> list[dict]:
         )
     if case:
         if not any(item["label"] == "DE-111" for item in links) and _petition_pdf_path(row):
-            add("DE-111", petition_public_uri(case))
+            add("DE-111", form_public_uri(case, "de111", nabu_base))
         if not any(item["label"] == "DE-147" for item in links) and _duties_pdf_path(row):
-            add("DE-147", duties_public_uri(case))
+            add("DE-147", form_public_uri(case, "de147", nabu_base))
     return links
+
+
+def publicize_listing_row(row: dict, nabu_base: str | None = None) -> dict:
+    """Listing row whose Documents hrefs are absolute Nabu Casa URLs.
+
+    ``de111_url`` and ``de147_url`` are rewritten too. The listings panel
+    prints both those fields and ``documents`` into the Documents column, so
+    leaving the stored LAN address on either field still shows a private IP.
+    """
+    item = dict(row or {})
+    nabu = str(nabu_base or os.environ.get("FUB_NABU_CASA_URL") or "").strip()
+    documents = listing_document_links(item, nabu)
+    if documents:
+        item["documents"] = documents
+    module = _document_base()
+    if not module.is_nabu_casa_ui_url(nabu):
+        return item
+    for key in ("de111_url", "de147_url"):
+        url = str(item.get(key) or "")
+        if url:
+            item[key] = module.public_document_url(url, nabu)
+    rewritten: list[dict] = []
+    for doc in item.get("documents") or []:
+        if isinstance(doc, str):
+            url = module.public_document_url(doc, nabu)
+            label = "Document"
+            clone = {"label": label, "url": url}
+        elif isinstance(doc, dict):
+            url = module.public_document_url(
+                str(doc.get("url") or doc.get("href") or ""),
+                nabu,
+            )
+            clone = dict(doc)
+            clone["url"] = url
+        else:
+            continue
+        if not url:
+            continue
+        rewritten.append(clone)
+    if rewritten:
+        item["documents"] = rewritten
+    return item
 
 
 def _petition_pdf_path(row: dict) -> Path | None:

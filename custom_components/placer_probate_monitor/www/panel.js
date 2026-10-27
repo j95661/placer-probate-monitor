@@ -1342,10 +1342,79 @@ class PlacerProbateFubPanel extends HTMLElement {
 customElements.define("placer-probate-sources-panel", PlacerProbateSourcesPanel);
 customElements.define("placer-probate-fub-panel", PlacerProbateFubPanel);
 
-function ppmListingDocs(row) {
+function ppmNabuOrigin(base) {
+  const text = String(base || "").trim();
+  if (!text) return "";
+  try {
+    const url = new URL(text.indexOf("://") === -1 ? "https://" + text : text);
+    const host = url.hostname.toLowerCase();
+    if (host === "ui.nabu.casa" || host.endsWith(".ui.nabu.casa")) {
+      return "https://" + host;
+    }
+  } catch (err) {
+    return "";
+  }
+  return "";
+}
+
+function ppmIsLocalDocumentHost(host, port) {
+  const name = String(host || "").toLowerCase().replace(/\.$/, "");
+  if (!name) return false;
+  if (
+    name === "localhost" ||
+    name === "homeassistant" ||
+    name === "hassio" ||
+    name.endsWith(".local") ||
+    name.endsWith(".lan") ||
+    name.endsWith(".home") ||
+    name.endsWith(".localdomain") ||
+    name.indexOf(".") === -1
+  ) {
+    return true;
+  }
+  if (String(port || "") === "8123") return true;
+  const ipv4 = name.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (!ipv4) return false;
+  const a = Number(ipv4[1]);
+  const b = Number(ipv4[2]);
+  if (a === 10 || a === 127 || a === 0 || a === 255) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 169 && b === 254) return true;
+  return false;
+}
+
+function ppmDocumentHref(url, documentBase) {
+  const raw = String(url || "").trim();
+  const origin = ppmNabuOrigin(documentBase);
+  if (!raw) return "";
+  if (raw.startsWith("/") && !raw.startsWith("//")) {
+    return origin ? origin + raw : "";
+  }
+  let parsed;
+  try {
+    parsed = new URL(raw.indexOf("://") === -1 ? "http://" + raw : raw);
+  } catch (err) {
+    return /^https?:\/\//i.test(raw) ? raw : "";
+  }
+  const host = parsed.hostname.toLowerCase();
+  if (host === "ui.nabu.casa" || host.endsWith(".ui.nabu.casa")) {
+    const path = parsed.pathname + parsed.search + parsed.hash;
+    return (origin || ("https://" + host)) + path;
+  }
+  if (!origin) {
+    return /^https?:\/\//i.test(raw) ? raw : "";
+  }
+  if (ppmIsLocalDocumentHost(host, parsed.port)) {
+    return origin + parsed.pathname + parsed.search + parsed.hash;
+  }
+  return /^https?:\/\//i.test(raw) ? raw : parsed.href;
+}
+
+function ppmListingDocs(row, documentBase) {
   const docs = [];
   const push = (label, url) => {
-    const href = String(url || "").trim();
+    const href = ppmDocumentHref(url, documentBase);
     if (!href || !/^https?:\/\//i.test(href)) return;
     docs.push({ label: label || "Document", url: href });
   };
@@ -1363,12 +1432,12 @@ function ppmListingDocs(row) {
   });
 }
 
-function ppmListingDocText(row) {
-  return ppmListingDocs(row).map((doc) => doc.label + " " + doc.url).join(" ");
+function ppmListingDocText(row, documentBase) {
+  return ppmListingDocs(row, documentBase).map((doc) => doc.label + " " + doc.url).join(" ");
 }
 
-function ppmListingDocCell(row) {
-  const docs = ppmListingDocs(row);
+function ppmListingDocCell(row, documentBase) {
+  const docs = ppmListingDocs(row, documentBase);
   if (!docs.length) return "—";
   return docs.map((doc) =>
     `<div><a href="${ppmEsc(doc.url)}" target="_blank" rel="noopener">${ppmEsc(doc.label)}</a><div class="ppm-note">${ppmEsc(doc.url)}</div></div>`
@@ -1382,6 +1451,7 @@ class PlacerProbateListingsPanel extends HTMLElement {
     this._ready = false;
     this._rows = [];
     this._query = "";
+    this._documentBase = "";
   }
 
   set hass(hass) {
@@ -1450,7 +1520,7 @@ class PlacerProbateListingsPanel extends HTMLElement {
       const blob = [
         row.case_number, row.date, row.source, row.petitioner, row.decedent,
         row.decedent_address, row.petitioner_address, row.newspaper, row.filed,
-        ppmListingDocText(row),
+        ppmListingDocText(row, this._documentBase),
       ].map((item) => String(item || "").toLowerCase()).join(" ");
       return blob.includes(q);
     });
@@ -1476,7 +1546,7 @@ class PlacerProbateListingsPanel extends HTMLElement {
         <td>${ppmEsc(row.petitioner || "—")}<div class="ppm-note">${ppmEsc(row.petitioner_address || "")}</div></td>
         <td>${ppmEsc(row.decedent || "—")}</td>
         <td>${ppmEsc(row.decedent_address || "—")}</td>
-        <td>${ppmListingDocCell(row)}</td>
+        <td>${ppmListingDocCell(row, this._documentBase)}</td>
       </tr>`;
     }).join("");
     this._qs("#listing-table").innerHTML = `
@@ -1501,6 +1571,7 @@ class PlacerProbateListingsPanel extends HTMLElement {
     this._flash("Loading collected listings…", true);
     try {
       const data = await this._hass.callApi("GET", "placer_probate_monitor/listings");
+      this._documentBase = data.document_base || "";
       this._rows = data.listings || [];
       this._renderTable();
       this._flash(`Loaded ${this._rows.length} collected listing${this._rows.length === 1 ? "" : "s"}.`, true);

@@ -50,7 +50,7 @@ from .fub_client import (
     sources_payload,
 )
 
-PANEL_JS_VERSION = "1.3.64"
+PANEL_JS_VERSION = "1.3.65"
 
 WWW = Path(__file__).resolve().parent / "www"
 MAP_HTML = WWW / "fub_map.html"
@@ -556,17 +556,26 @@ class ListingsView(HomeAssistantView):
         self.hass = hass
 
     async def get(self, request):
-        payload = await self.hass.async_add_executor_job(_listings_payload, self.hass)
+        # Resolve Nabu Casa on the event loop. The listings payload runs in
+        # an executor, and importing the cloud integration there can miss the
+        # live remote UI URL, leaving document hrefs on the LAN address.
+        from .document_base import peek_nabu_casa_origin
+
+        request_url = ""
+        try:
+            request_url = str(request.url)
+        except Exception:  # noqa: BLE001
+            request_url = ""
+        hinted = peek_nabu_casa_origin(self.hass, request_url)
+        payload = await self.hass.async_add_executor_job(
+            _listings_payload, self.hass, hinted
+        )
         return self.json(payload)
 
 
-def _listings_payload(hass: HomeAssistant) -> dict:
-    from .document_base import (
-        apply_document_base,
-        is_local_or_private_url,
-        rewrite_local_document_url,
-    )
-    from .fub_client import listing_document_links
+def _listings_payload(hass: HomeAssistant, hinted: str = "") -> dict:
+    from .document_base import apply_document_base, is_nabu_casa_ui_url, nabu_casa_origin
+    from .fub_client import publicize_listing_row
     from .placer_probate_monitor import (
         _read_listings_catalog,
         merge_listings,
@@ -577,7 +586,7 @@ def _listings_payload(hass: HomeAssistant) -> dict:
     entry = _entry(hass)
     if entry:
         os.environ["FUB_PETITION_TOKEN_SECRET"] = entry.entry_id
-    apply_document_base(hass)
+    origin = apply_document_base(hass, hinted)
     path = data_dir / "listings.json"
     catalog = _read_listings_catalog(path)
     reports = data_dir / "reports"
@@ -606,19 +615,16 @@ def _listings_payload(hass: HomeAssistant) -> dict:
         reverse=True,
     )
     nabu = str(os.environ.get("FUB_NABU_CASA_URL") or "")
-    public_rows = []
-    for item in listings:
-        row = dict(item)
-        documents = listing_document_links(row)
-        if documents:
-            row["documents"] = documents
-        if nabu:
-            for key in ("de111_url", "de147_url"):
-                url = str(row.get(key) or "")
-                if url and is_local_or_private_url(url):
-                    row[key] = rewrite_local_document_url(url, nabu)
-        public_rows.append(row)
-    return {"count": len(public_rows), "listings": public_rows}
+    if not nabu and is_nabu_casa_ui_url(origin):
+        nabu = nabu_casa_origin(origin)
+    if not nabu and is_nabu_casa_ui_url(hinted):
+        nabu = nabu_casa_origin(hinted)
+    public_rows = [publicize_listing_row(item, nabu) for item in listings]
+    return {
+        "count": len(public_rows),
+        "document_base": nabu,
+        "listings": public_rows,
+    }
 
 
 def _register_panel(hass: HomeAssistant, url_path: str, title: str, icon: str, element: str) -> None:
