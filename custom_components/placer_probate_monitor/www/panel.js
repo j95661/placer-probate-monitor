@@ -1384,46 +1384,89 @@ function ppmIsLocalDocumentHost(host, port) {
   return false;
 }
 
-function ppmDocumentHref(url, documentBase) {
-  const raw = String(url || "").trim();
-  const origin = ppmNabuOrigin(documentBase);
-  if (!raw) return "";
-  if (raw.startsWith("/") && !raw.startsWith("//")) {
-    return origin ? origin + raw : "";
+function ppmApiPath(url) {
+  const text = String(url || "").trim();
+  const marker = "/api/placer_probate_monitor/";
+  const idx = text.indexOf(marker);
+  if (idx >= 0) return text.slice(idx).split("#")[0];
+  if (text.startsWith("/") && !text.startsWith("//")) return text.split("#")[0];
+  return "";
+}
+
+async function ppmCloudRemoteOrigin(hass) {
+  if (!hass || typeof hass.callWS !== "function") return "";
+  try {
+    const status = await hass.callWS({ type: "cloud/status" });
+    if (!status || status.logged_in === false) return "";
+    const cert = status.remote_certificate || {};
+    const prefs = status.prefs || {};
+    const candidates = [
+      status.remote_domain,
+      status.remote_ui,
+      cert.common_name,
+      prefs.remote_domain,
+      prefs.remote_ui,
+    ];
+    (cert.alternative_names || []).forEach((name) => candidates.push(name));
+    for (let i = 0; i < candidates.length; i += 1) {
+      const origin = ppmNabuOrigin(candidates[i]);
+      if (origin) return origin;
+    }
+  } catch (err) {
+    return "";
   }
+  return "";
+}
+
+function ppmDocumentHref(url, documentBase, pathHint) {
+  const origin = ppmNabuOrigin(documentBase);
+  const path = ppmApiPath(pathHint) || ppmApiPath(url);
+  if (origin && path.indexOf("/api/placer_probate_monitor/") === 0) {
+    return origin + path;
+  }
+  const raw = String(url || "").trim();
+  if (!raw) return "";
   let parsed;
   try {
     parsed = new URL(raw.indexOf("://") === -1 ? "http://" + raw : raw);
   } catch (err) {
-    return /^https?:\/\//i.test(raw) ? raw : "";
+    return "";
   }
   const host = parsed.hostname.toLowerCase();
   if (host === "ui.nabu.casa" || host.endsWith(".ui.nabu.casa")) {
-    const path = parsed.pathname + parsed.search + parsed.hash;
-    return (origin || ("https://" + host)) + path;
+    const suffix = parsed.pathname + parsed.search + parsed.hash;
+    return (origin || ("https://" + host)) + suffix;
   }
-  if (!origin) {
-    return /^https?:\/\//i.test(raw) ? raw : "";
-  }
-  if (ppmIsLocalDocumentHost(host, parsed.port)) {
-    return origin + parsed.pathname + parsed.search + parsed.hash;
-  }
-  return /^https?:\/\//i.test(raw) ? raw : parsed.href;
+  if (ppmIsLocalDocumentHost(host, parsed.port)) return "";
+  if (origin && path) return origin + path;
+  return /^https?:\/\//i.test(raw) ? raw : "";
 }
 
 function ppmListingDocs(row, documentBase) {
   const docs = [];
-  const push = (label, url) => {
-    const href = ppmDocumentHref(url, documentBase);
+  const push = (label, url, pathHint) => {
+    const href = ppmDocumentHref(url, documentBase, pathHint);
     if (!href || !/^https?:\/\//i.test(href)) return;
+    let host = "";
+    let port = "";
+    try {
+      const parsed = new URL(href);
+      host = parsed.hostname;
+      port = parsed.port;
+    } catch (err) {
+      return;
+    }
+    if (ppmIsLocalDocumentHost(host, port)) return;
+    const nabu = host === "ui.nabu.casa" || host.endsWith(".ui.nabu.casa");
+    if (href.indexOf("/api/placer_probate_monitor/") >= 0 && !nabu) return;
     docs.push({ label: label || "Document", url: href });
   };
   (row.documents || []).forEach((doc) => {
-    if (typeof doc === "string") push("Document", doc);
-    else if (doc) push(doc.label || doc.name || "Document", doc.url || doc.href);
+    if (typeof doc === "string") push("Document", doc, "");
+    else if (doc) push(doc.label || doc.name || "Document", doc.url || doc.href, doc.path);
   });
-  push("DE-111", row.de111_url);
-  push("DE-147", row.de147_url);
+  push("DE-111", row.de111_url, row.de111_path);
+  push("DE-147", row.de147_url, row.de147_path);
   const seen = new Set();
   return docs.filter((doc) => {
     if (seen.has(doc.url)) return false;
@@ -1570,11 +1613,19 @@ class PlacerProbateListingsPanel extends HTMLElement {
   async _load() {
     this._flash("Loading collected listings…", true);
     try {
-      const data = await this._hass.callApi("GET", "placer_probate_monitor/listings");
-      this._documentBase = data.document_base || "";
+      const listingsCall = this._hass.callApi("GET", "placer_probate_monitor/listings");
+      const cloudCall = ppmCloudRemoteOrigin(this._hass);
+      const data = await listingsCall;
+      const cloudOrigin = await cloudCall;
+      this._documentBase = ppmNabuOrigin(data.document_base) || cloudOrigin || "";
       this._rows = data.listings || [];
       this._renderTable();
-      this._flash(`Loaded ${this._rows.length} collected listing${this._rows.length === 1 ? "" : "s"}.`, true);
+      const count = `Loaded ${this._rows.length} collected listing${this._rows.length === 1 ? "" : "s"}.`;
+      if (!this._documentBase && data.document_base_error) {
+        this._flash(`${count} ${data.document_base_error}`, false);
+      } else {
+        this._flash(count, true);
+      }
     } catch (err) {
       this._flash(ppmText(err), false);
     }

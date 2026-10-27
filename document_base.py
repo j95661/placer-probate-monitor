@@ -12,6 +12,8 @@ import inspect
 import ipaddress
 import json
 import os
+import re
+import ssl
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -98,6 +100,28 @@ def nabu_casa_origin(url: str) -> str:
     if port and port not in (80, 443):
         return f"https://{host}:{port}"
     return f"https://{host}"
+
+
+_UI_HOST_RE = re.compile(r"(?:[a-z0-9-]+\.)+ui\.nabu\.casa", re.I)
+_STORAGE_HOST_KEYS = (
+    "remote_domain",
+    "remote_ui",
+    "remote_ui_url",
+    "instance_domain",
+)
+
+
+def document_api_path(url: str) -> str:
+    """Return ``/api/placer_probate_monitor/...`` or another relative path."""
+    text = str(url or "").strip()
+    if not text:
+        return ""
+    idx = text.find(DOCUMENT_API_MARK)
+    if idx >= 0:
+        return text[idx:].split("#", 1)[0]
+    if text.startswith("/") and not text.startswith("//"):
+        return text.split("#", 1)[0]
+    return ""
 
 
 def _document_api_base_path(url: str) -> str:
@@ -233,13 +257,16 @@ def public_document_url(url: str, nabu_base: str) -> str:
 def _attr(obj, name: str):
     if obj is None:
         return None
-    if isinstance(obj, dict):
-        return obj.get(name)
-    return getattr(obj, name, None)
+    try:
+        if isinstance(obj, dict):
+            return obj.get(name)
+        return getattr(obj, name, None)
+    except Exception:
+        return None
 
 
 def _add_url(found: list[str], value) -> None:
-    if value is None:
+    if value is None or isinstance(value, bool):
         return
     text = str(value).strip()
     if not text:
@@ -247,86 +274,259 @@ def _add_url(found: list[str], value) -> None:
     if "://" in text or NABU_UI_HOST in text or text.startswith("hooks."):
         if "://" not in text:
             text = "https://" + text.lstrip("/")
-        found.append(text)
+        if text not in found:
+            found.append(text)
 
 
-def urls_from_cloud_object(cloud) -> list[str]:
-    """Remote UI and cloudhook URLs stored on ``hass.data['cloud']``."""
+def _add_nabu_host(found: list[str], value) -> None:
+    """Keep only ``*.ui.nabu.casa`` hosts. ``hooks.nabu.casa`` is not one."""
+    if value is None or isinstance(value, bool):
+        return
+    text = str(value).strip()
+    if not text:
+        return
+    if is_nabu_casa_cloudhook_url(text):
+        return
+    if is_nabu_casa_ui_url(text) or NABU_UI_HOST in text:
+        _add_url(found, text)
+
+
+def _certificate_names(cert) -> list[str]:
+    names: list[str] = []
+    if cert is None:
+        return names
+    for attr in ("common_name", "commonName"):
+        value = _attr(cert, attr)
+        if isinstance(value, str) and value.strip():
+            names.append(value.strip())
+    alts = _attr(cert, "alternative_names")
+    if alts is None:
+        alts = _attr(cert, "alt_names")
+    if isinstance(alts, (list, tuple)):
+        for alt in alts:
+            if isinstance(alt, str) and alt.strip():
+                names.append(alt.strip())
+    return names
+
+
+def urls_from_cloud_remote(cloud) -> list[str]:
+    """Live remote UI host on ``hass.data['cloud']``.
+
+    Preference inside this object is ``remote_domain`` / ``remote_ui``, then
+    ``instance_domain``, then the certificate common name. Cloud prefs and
+    ``hooks.nabu.casa`` are not read here.
+    """
     found: list[str] = []
     if cloud is None:
         return found
     remote = _attr(cloud, "remote")
-    for name in ("instance_domain", "remote_ui_url", "ui_url", "remote_domain"):
-        _add_url(found, _attr(remote, name))
-        _add_url(found, _attr(cloud, name))
-    client = _attr(cloud, "client")
-    prefs = _attr(client, "prefs")
-    _add_url(found, _attr(prefs, "remote_domain"))
-    _add_url(found, _attr(prefs, "remote_ui_url"))
-    raw_prefs = _attr(prefs, "_prefs")
-    if isinstance(raw_prefs, dict):
-        _add_url(found, raw_prefs.get("remote_domain"))
-    _add_url(found, _attr(remote, "_instance_domain"))
+    for name in ("remote_domain", "remote_ui", "remote_ui_url", "ui_url"):
+        _add_nabu_host(found, _attr(remote, name))
+        _add_nabu_host(found, _attr(cloud, name))
+    for name in ("instance_domain", "_instance_domain"):
+        _add_nabu_host(found, _attr(remote, name))
+        _add_nabu_host(found, _attr(cloud, name))
+    for cert in (
+        _attr(remote, "certificate"),
+        _attr(remote, "_acme"),
+        _attr(cloud, "certificate"),
+    ):
+        for name in _certificate_names(cert):
+            _add_nabu_host(found, name)
+        _add_nabu_host(found, _attr(cert, "domain"))
     aliases = _attr(remote, "alias")
     if aliases is None:
         aliases = _attr(remote, "_alias")
     if isinstance(aliases, (list, tuple)):
         for alias in aliases:
-            if isinstance(alias, str) and NABU_UI_HOST in alias:
-                _add_url(found, alias)
+            _add_nabu_host(found, alias)
+    return found
+
+
+def urls_from_cloud_prefs(cloud) -> list[str]:
+    """``remote_domain`` / ``remote_ui`` on ``cloud.client.prefs``."""
+    found: list[str] = []
+    if cloud is None:
+        return found
+    client = _attr(cloud, "client")
+    prefs = _attr(client, "prefs")
+    sources = [prefs, _attr(prefs, "_prefs"), client, cloud]
+    for source in sources:
+        if source is None:
+            continue
+        for name in ("remote_domain", "remote_ui", "remote_ui_url"):
+            _add_nabu_host(found, _attr(source, name))
+    return found
+
+
+def _cloudhook_values(cloud) -> list:
+    hooks = []
+    if cloud is None:
+        return hooks
+    client = _attr(cloud, "client")
+    prefs = _attr(client, "prefs")
     for source in (
         _attr(prefs, "cloudhooks"),
         _attr(client, "cloudhooks"),
         _attr(cloud, "cloudhooks"),
     ):
         if isinstance(source, dict):
-            hooks = list(source.values())
+            values = list(source.values())
         elif isinstance(source, (list, tuple)):
-            hooks = list(source)
+            values = list(source)
         else:
             continue
-        for hook in hooks:
+        for hook in values:
             if isinstance(hook, str):
-                _add_url(found, hook)
+                hooks.append(hook)
             elif isinstance(hook, dict):
-                _add_url(found, hook.get("cloudhook_url") or hook.get("url"))
+                hooks.append(hook.get("cloudhook_url") or hook.get("url"))
             else:
-                _add_url(found, _attr(hook, "cloudhook_url"))
-                _add_url(found, _attr(hook, "url"))
+                hooks.append(_attr(hook, "cloudhook_url"))
+                hooks.append(_attr(hook, "url"))
+    return hooks
+
+
+def urls_from_cloud_object(cloud) -> list[str]:
+    """Remote UI, prefs, and cloudhook URLs stored on ``hass.data['cloud']``."""
+    found: list[str] = []
+    found.extend(urls_from_cloud_remote(cloud))
+    found.extend(urls_from_cloud_prefs(cloud))
+    for hook in _cloudhook_values(cloud):
+        _add_url(found, hook)
     return found
 
 
 def urls_from_cloud_storage(path) -> list[str]:
-    """``remote_domain`` saved in ``.storage/cloud``.
+    """Remote UI host saved in ``.storage/cloud``.
 
-    Cloudhook URLs in that file are ignored. They are ``hooks.nabu.casa``
-    webhook addresses, not the document API, and they carry webhook secrets.
+    ``remote_domain`` wins, then ``remote_ui``. Any other ``*.ui.nabu.casa``
+    host in the file is kept. ``hooks.nabu.casa`` webhook URLs are ignored
+    so their secrets are never used as the document host.
     """
     found: list[str] = []
     try:
-        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        raw = Path(path).read_text(encoding="utf-8")
+        payload = json.loads(raw)
     except (OSError, TypeError, ValueError, json.JSONDecodeError):
         return found
     data = payload.get("data") if isinstance(payload, dict) else None
     if not isinstance(data, dict):
-        return found
-    _add_url(found, data.get("remote_domain"))
+        data = payload if isinstance(payload, dict) else {}
+    for key in _STORAGE_HOST_KEYS:
+        _add_nabu_host(found, data.get(key))
+    nested = data.get("prefs") if isinstance(data, dict) else None
+    if isinstance(nested, dict):
+        for key in _STORAGE_HOST_KEYS:
+            _add_nabu_host(found, nested.get(key))
+    for host in _UI_HOST_RE.findall(raw):
+        _add_nabu_host(found, host)
     return found
 
 
-def _cloud_storage_urls(hass) -> list[str]:
+def urls_from_certificate_file(path) -> list[str]:
+    """Common name on ``.cloud/remote_fullchain.pem`` when it is the remote UI."""
+    found: list[str] = []
+    try:
+        decoded = ssl._ssl._test_decode_cert(os.fspath(path))
+    except Exception:
+        return found
+    names: list[str] = []
+    for rdn in decoded.get("subject") or ():
+        for item in rdn:
+            if (
+                isinstance(item, (list, tuple))
+                and len(item) >= 2
+                and item[0] == "commonName"
+            ):
+                names.append(str(item[1]))
+    for item in decoded.get("subjectAltName") or ():
+        if isinstance(item, (list, tuple)) and len(item) >= 2 and item[0] == "DNS":
+            names.append(str(item[1]))
+    for name in names:
+        _add_nabu_host(found, name)
+    return found
+
+
+def _config_dir(hass) -> str:
     config = getattr(hass, "config", None)
+    raw = _attr(config, "config_dir")
+    if raw:
+        return str(raw)
     path_fn = _attr(config, "path")
     if not callable(path_fn):
-        return []
-    for parts in ((".storage", "cloud"), (".storage/cloud",)):
+        return ""
+    for args in ((), ("x",)):
         try:
-            raw_path = path_fn(*parts)
+            sample = path_fn(*args)
         except TypeError:
             continue
         except Exception:
-            return []
+            return ""
+        if not sample:
+            continue
+        path = Path(str(sample))
+        return str(path if not args else path.parent)
+    return ""
+
+
+def _cloud_from_hass(hass):
+    data = getattr(hass, "data", None)
+    if data is None:
+        return None
+    try:
+        return data.get("cloud")
+    except Exception:
+        return None
+
+
+def _path_candidates(hass, *relative: str) -> list[str]:
+    paths: list[str] = []
+    config = getattr(hass, "config", None)
+    path_fn = _attr(config, "path")
+    if callable(path_fn):
+        try:
+            paths.append(str(path_fn(*relative)))
+        except TypeError:
+            try:
+                paths.append(str(path_fn("/".join(relative))))
+            except Exception:
+                pass
+        except Exception:
+            pass
+    config_dir = _config_dir(hass)
+    if config_dir:
+        paths.append(str(Path(config_dir).joinpath(*relative)))
+    unique: list[str] = []
+    for path in paths:
+        if path and path not in unique:
+            unique.append(path)
+    return unique
+
+
+def _cloud_storage_urls(hass) -> list[str]:
+    for raw_path in _path_candidates(hass, ".storage", "cloud"):
         found = urls_from_cloud_storage(raw_path)
+        if found:
+            return found
+    return []
+
+
+def _certificate_file_urls(hass, cloud) -> list[str]:
+    paths: list[str] = []
+    path_fn = _attr(cloud, "path")
+    if callable(path_fn):
+        try:
+            paths.append(str(path_fn("remote_fullchain.pem")))
+        except Exception:
+            pass
+    paths.extend(_path_candidates(hass, ".cloud", "remote_fullchain.pem"))
+    seen: set[str] = set()
+    for raw_path in paths:
+        if not raw_path or raw_path in seen:
+            continue
+        seen.add(raw_path)
+        found = urls_from_certificate_file(raw_path)
         if found:
             return found
     return []
@@ -349,49 +549,177 @@ def _append_remote_ui_url(candidates: list[str], hass) -> None:
         candidates.append(str(found))
 
 
-def collect_url_candidates(hass) -> list[str]:
-    """External URL, cloud remote UI, stored remote domain, then LAN fallbacks.
-
-    ``get_url(prefer_external=True)`` returns the LAN address when the
-    external URL is unset or is itself a private IP. The Nabu Casa remote UI
-    is still collected from the cloud integration and from ``.storage/cloud``
-    so it can win over that LAN address.
-    """
-    candidates: list[str] = []
-    config = getattr(hass, "config", None)
-    external = _attr(config, "external_url")
-    internal = _attr(config, "internal_url")
-    if external:
-        candidates.append(str(external))
-    cloud = None
-    data = getattr(hass, "data", None)
-    if data is not None:
-        try:
-            cloud = data.get("cloud")
-        except Exception:
-            cloud = None
-    candidates.extend(urls_from_cloud_object(cloud))
-    candidates.extend(_cloud_storage_urls(hass))
-    if internal:
-        candidates.append(str(internal))
-    _append_remote_ui_url(candidates, hass)
+def _get_url_candidates(hass) -> list[str]:
+    found: list[str] = []
     try:
         from homeassistant.helpers.network import get_url
-
-        for kwargs in (
-            {"prefer_external": True, "prefer_cloud": True},
-            {"prefer_external": True, "require_cloud": True},
-            {"prefer_external": True},
-        ):
+    except Exception:
+        return found
+    for kwargs in (
+        {"prefer_external": True, "prefer_cloud": True},
+        {"prefer_external": True, "require_cloud": True},
+        {"prefer_external": True},
+    ):
+        try:
+            url = get_url(hass, **kwargs)
+        except TypeError:
             try:
-                found = get_url(hass, **kwargs)
+                url = get_url(hass)
             except Exception:
                 continue
-            if found:
-                candidates.append(str(found))
-    except Exception:
-        pass
-    return [item for item in candidates if str(item or "").strip()]
+        except Exception:
+            continue
+        if url:
+            found.append(str(url))
+    return found
+
+
+def _configured_url(hass, name: str) -> str:
+    config = getattr(hass, "config", None)
+    value = _attr(config, name)
+    return str(value).strip() if value else ""
+
+
+def collect_url_candidates(hass) -> list[str]:
+    """Nabu Casa remote UI first. A private ``get_url`` result does not win.
+
+    Order when a host is present:
+
+    1. Cloud ``remote_domain`` / ``remote_ui`` / certificate common name
+    2. ``external_url`` only when it is ``*.ui.nabu.casa``
+    3. ``.storage/cloud``
+    4. ``cloud.client`` prefs
+    5. The remote UI certificate file, then ``async_remote_ui_url`` / ``get_url``
+       when those themselves return ``*.ui.nabu.casa``
+
+    LAN addresses, localhost, and ``host:8123`` stay at the end and are used
+    only when no Nabu Casa remote UI host exists. ``hooks.nabu.casa`` is never
+    a document host.
+    """
+    cloud = _cloud_from_hass(hass)
+    external = _configured_url(hass, "external_url")
+    internal = _configured_url(hass, "internal_url")
+    live: list[str] = []
+    _append_remote_ui_url(live, hass)
+    live.extend(_get_url_candidates(hass))
+    nabu_live = [item for item in live if is_nabu_casa_ui_url(item)]
+    other_live = [item for item in live if not is_nabu_casa_ui_url(item)]
+    hook_ui = [
+        str(item)
+        for item in _cloudhook_values(cloud)
+        if item and is_nabu_casa_ui_url(str(item)) and not is_nabu_casa_cloudhook_url(str(item))
+    ]
+    ordered = [
+        *urls_from_cloud_remote(cloud),
+        *([external] if external and is_nabu_casa_ui_url(external) else []),
+        *_cloud_storage_urls(hass),
+        *urls_from_cloud_prefs(cloud),
+        *_certificate_file_urls(hass, cloud),
+        *hook_ui,
+        *nabu_live,
+        *([external] if external and not is_nabu_casa_ui_url(external) else []),
+        *([internal] if internal else []),
+        *other_live,
+    ]
+    unique: list[str] = []
+    for item in ordered:
+        text = str(item or "").strip()
+        if text and text not in unique:
+            unique.append(text)
+    return unique
+
+
+def _storage_probe_note(hass) -> str:
+    if hass is None:
+        return ""
+    paths = _path_candidates(hass, ".storage", "cloud")
+    existing = next((path for path in paths if Path(path).is_file()), "")
+    if not existing:
+        return ".storage/cloud was not found."
+    try:
+        payload = json.loads(Path(existing).read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return ".storage/cloud could not be read."
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, dict):
+        return ".storage/cloud has no data object."
+    hosts = [
+        str(data.get(key) or "").strip()
+        for key in ("remote_domain", "remote_ui", "remote_ui_url")
+    ]
+    if any(is_nabu_casa_ui_url(host) for host in hosts):
+        return ""
+    if any(hosts):
+        return ".storage/cloud remote_domain/remote_ui is not a *.ui.nabu.casa host."
+    if "google_enabled" in data or "remote_enabled" in data:
+        return (
+            ".storage/cloud is present (google_enabled/remote_enabled) but "
+            "remote_domain and remote_ui are empty."
+        )
+    return ".storage/cloud has no remote_domain or remote_ui."
+
+
+def explain_missing_nabu_origin(hass, candidates: list[str] | None = None) -> str:
+    """Why the listings payload refused a private document host."""
+    local: list[str] = []
+    saw_hook = False
+    for item in candidates or []:
+        if is_nabu_casa_cloudhook_url(item):
+            saw_hook = True
+            continue
+        if is_nabu_casa_ui_url(item):
+            continue
+        if (
+            is_local_or_private_url(item)
+            or should_rewrite_document_url(item)
+        ):
+            host = hostname_of(item) or "local"
+            if host not in local:
+                local.append(host)
+    parts = [
+        "No Nabu Casa remote UI host found.",
+        "Checked cloud remote_domain/remote_ui/certificate, external_url "
+        "when it is *.ui.nabu.casa, .storage/cloud, and cloud.client prefs.",
+    ]
+    if local:
+        parts.append(
+            "Ignored private or local hosts from internal_url, external_url, "
+            "or get_url (" + ", ".join(local) + ")."
+        )
+    else:
+        parts.append("internal_url and get_url did not return *.ui.nabu.casa.")
+    note = _storage_probe_note(hass)
+    if note:
+        parts.append(note)
+    if saw_hook:
+        parts.append("hooks.nabu.casa was not used as the document host.")
+    parts.append("Private document links were left out of the listings payload.")
+    return " ".join(parts)
+
+
+def discover_nabu_origin(hass, *extra) -> tuple[str, str]:
+    """``(https://<instance>.ui.nabu.casa, "")`` or ``("", reason)``.
+
+    A private IP, localhost, or ``host:8123`` is never returned, including
+    when that is what ``get_url`` or the page request host reports.
+    """
+    candidates: list[str] = []
+    if hass is not None:
+        candidates.extend(collect_url_candidates(hass))
+    # A Nabu Casa request host is only a fallback. Cloud remote_domain /
+    # remote_ui already in ``candidates`` stays ahead of it. A LAN request
+    # host is ignored so opening the page on 192.168.x.x:8123 cannot win.
+    for item in extra:
+        text = str(item or "").strip()
+        if text and is_nabu_casa_ui_url(text) and text not in candidates:
+            candidates.append(text)
+    hinted = [item for item in candidates if is_nabu_casa_ui_url(item)]
+    origin = document_origin(*candidates)
+    if is_nabu_casa_ui_url(origin):
+        return nabu_casa_origin(origin), ""
+    if hass is None and not hinted:
+        return "", "Home Assistant is not available to read the Nabu Casa remote UI host."
+    return "", explain_missing_nabu_origin(hass, candidates)
 
 
 def peek_nabu_casa_origin(hass, request_url: str = "") -> str:
@@ -401,15 +729,11 @@ def peek_nabu_casa_origin(hass, request_url: str = "") -> str:
     ``async_remote_ui_url`` can see the live cloud object. A LAN request URL
     is not returned.
     """
-    candidates: list[str] = []
-    if request_url and is_nabu_casa_ui_url(request_url):
-        candidates.append(str(request_url))
-    if hass is not None:
-        candidates.extend(collect_url_candidates(hass))
-    origin = document_origin(*candidates)
-    if not is_nabu_casa_ui_url(origin):
-        return ""
-    return nabu_casa_origin(origin)
+    origin, _error = discover_nabu_origin(
+        hass,
+        request_url if is_nabu_casa_ui_url(request_url) else "",
+    )
+    return origin
 
 
 def apply_document_base(hass, *extra) -> str:

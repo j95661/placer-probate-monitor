@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from datetime import datetime
 from pathlib import Path
@@ -50,7 +51,9 @@ from .fub_client import (
     sources_payload,
 )
 
-PANEL_JS_VERSION = "1.3.65"
+PANEL_JS_VERSION = "1.3.66"
+
+_LOGGER = logging.getLogger(__name__)
 
 WWW = Path(__file__).resolve().parent / "www"
 MAP_HTML = WWW / "fub_map.html"
@@ -574,7 +577,7 @@ class ListingsView(HomeAssistantView):
 
 
 def _listings_payload(hass: HomeAssistant, hinted: str = "") -> dict:
-    from .document_base import apply_document_base, is_nabu_casa_ui_url, nabu_casa_origin
+    from .document_base import apply_document_base, discover_nabu_origin
     from .fub_client import publicize_listing_row
     from .placer_probate_monitor import (
         _read_listings_catalog,
@@ -586,7 +589,13 @@ def _listings_payload(hass: HomeAssistant, hinted: str = "") -> dict:
     entry = _entry(hass)
     if entry:
         os.environ["FUB_PETITION_TOKEN_SECRET"] = entry.entry_id
-    origin = apply_document_base(hass, hinted)
+    # Keep FUB base env in sync, then pick the document host again. A private
+    # internal_url or get_url result must not become the Documents href when
+    # cloud remote_domain / remote_ui / .storage/cloud has the remote UI.
+    apply_document_base(hass, hinted)
+    origin, error = discover_nabu_origin(hass, hinted)
+    if error:
+        _LOGGER.warning("Probate listing documents: %s", error)
     path = data_dir / "listings.json"
     catalog = _read_listings_catalog(path)
     reports = data_dir / "reports"
@@ -614,15 +623,11 @@ def _listings_payload(hass: HomeAssistant, hinted: str = "") -> dict:
         ),
         reverse=True,
     )
-    nabu = str(os.environ.get("FUB_NABU_CASA_URL") or "")
-    if not nabu and is_nabu_casa_ui_url(origin):
-        nabu = nabu_casa_origin(origin)
-    if not nabu and is_nabu_casa_ui_url(hinted):
-        nabu = nabu_casa_origin(hinted)
-    public_rows = [publicize_listing_row(item, nabu) for item in listings]
+    public_rows = [publicize_listing_row(item, origin) for item in listings]
     return {
         "count": len(public_rows),
-        "document_base": nabu,
+        "document_base": origin,
+        "document_base_error": error,
         "listings": public_rows,
     }
 

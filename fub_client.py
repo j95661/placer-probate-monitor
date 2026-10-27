@@ -2169,46 +2169,108 @@ def listing_document_links(row: dict, nabu_base: str | None = None) -> list[dict
     return links
 
 
+def _absolute_document_href(url: str, nabu: str) -> str:
+    """Absolute Nabu Casa document URL, or ``""`` when that host is unknown.
+
+    A private IP, localhost, relative ``/api`` path, or ``host:8123`` is never
+    returned. Court URLs that are already public stay unchanged.
+    """
+    module = _document_base()
+    text = str(url or "").strip()
+    if not text:
+        return ""
+    if module.is_nabu_casa_ui_url(nabu):
+        rewritten = module.public_document_url(text, nabu)
+        if module.is_nabu_casa_ui_url(rewritten):
+            return rewritten
+        path = module.document_api_path(text) or module.document_api_path(rewritten)
+        origin = module.nabu_casa_origin(nabu)
+        if origin and path.startswith("/"):
+            return f"{origin}{path}"
+        if rewritten and not module.should_rewrite_document_url(rewritten):
+            return rewritten
+        return ""
+    if module.should_rewrite_document_url(text):
+        return ""
+    return text
+
+
+def _is_private_document_href(url: str) -> bool:
+    module = _document_base()
+    text = str(url or "").strip()
+    if not text or text.startswith("/api/"):
+        return False
+    if "/api/placer_probate_monitor/" not in text and "://" not in text and ":8123" not in text:
+        return False
+    return module.should_rewrite_document_url(text)
+
+
+def _purge_private_hrefs(value, key: str = ""):
+    """Drop private document hrefs. ``path`` keeps the API path only."""
+    if key == "path":
+        return value
+    if isinstance(value, str):
+        return "" if _is_private_document_href(value) else value
+    if isinstance(value, list):
+        return [_purge_private_hrefs(item) for item in value]
+    if isinstance(value, dict):
+        return {name: _purge_private_hrefs(item, name) for name, item in value.items()}
+    return value
+
+
 def publicize_listing_row(row: dict, nabu_base: str | None = None) -> dict:
     """Listing row whose Documents hrefs are absolute Nabu Casa URLs.
 
-    ``de111_url`` and ``de147_url`` are rewritten too. The listings panel
-    prints both those fields and ``documents`` into the Documents column, so
-    leaving the stored LAN address on either field still shows a private IP.
+    ``de111_url``, ``de147_url``, and ``documents`` are what the listings
+    panel prints in the Documents column. A stored LAN address on any of
+    them is rewritten when a Nabu Casa host is known. When it is not, the
+    private IP is removed instead of being returned as the href. ``path``
+    keeps ``/api/placer_probate_monitor/...`` so the panel can still build
+    an absolute remote URL from Home Assistant Cloud.
     """
     item = dict(row or {})
+    module = _document_base()
     nabu = str(nabu_base or os.environ.get("FUB_NABU_CASA_URL") or "").strip()
-    documents = listing_document_links(item, nabu)
+    if not module.is_nabu_casa_ui_url(nabu):
+        nabu = ""
+    documents = listing_document_links(item, nabu or None)
     if documents:
         item["documents"] = documents
-    module = _document_base()
-    if not module.is_nabu_casa_ui_url(nabu):
-        return item
+
+    def stash(raw: str) -> tuple[str, str]:
+        text = str(raw or "").strip()
+        return _absolute_document_href(text, nabu), module.document_api_path(text)
+
     for key in ("de111_url", "de147_url"):
-        url = str(item.get(key) or "")
-        if url:
-            item[key] = module.public_document_url(url, nabu)
+        url, path = stash(str(item.get(key) or ""))
+        if url or path or item.get(key):
+            item[key] = url
+        if path:
+            item[key.replace("_url", "_path")] = path
     rewritten: list[dict] = []
     for doc in item.get("documents") or []:
         if isinstance(doc, str):
-            url = module.public_document_url(doc, nabu)
+            raw = doc
             label = "Document"
-            clone = {"label": label, "url": url}
+            clone = {"label": label}
         elif isinstance(doc, dict):
-            url = module.public_document_url(
-                str(doc.get("url") or doc.get("href") or ""),
-                nabu,
-            )
+            raw = str(doc.get("url") or doc.get("href") or "")
             clone = dict(doc)
-            clone["url"] = url
+            label = str(clone.get("label") or clone.get("name") or "Document")
+            clone["label"] = label
         else:
             continue
-        if not url:
+        url, path = stash(raw)
+        if not url and not path:
             continue
+        clone["url"] = url
+        if path:
+            clone["path"] = path
+        clone.pop("href", None)
         rewritten.append(clone)
     if rewritten:
         item["documents"] = rewritten
-    return item
+    return _purge_private_hrefs(item)
 
 
 def _petition_pdf_path(row: dict) -> Path | None:
