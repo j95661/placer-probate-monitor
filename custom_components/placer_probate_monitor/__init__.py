@@ -175,22 +175,18 @@ def apply_env(
         entry = hass.config_entries.async_entries(DOMAIN)
         if entry:
             os.environ["FUB_PETITION_TOKEN_SECRET"] = entry[0].entry_id
+        # Nabu Casa remote UI when it is configured. get_url(prefer_external)
+        # returns the LAN address when external_url is empty or is itself a
+        # local IP, even if Home Assistant Cloud is logged in.
         try:
-            from homeassistant.helpers.network import get_url
+            from .document_base import apply_document_base
+        except ImportError:
+            from document_base import apply_document_base
 
-            base = str(get_url(hass, prefer_external=True) or "").rstrip("/")
-        except Exception:  # noqa: BLE001
-            base = ""
-        if base:
-            os.environ["FUB_PETITION_BASE_URL"] = (
-                f"{base}/api/placer_probate_monitor/de111"
-            )
-            os.environ["FUB_DUTIES_BASE_URL"] = (
-                f"{base}/api/placer_probate_monitor/de147"
-            )
-        else:
+        if not apply_document_base(hass):
             os.environ.pop("FUB_PETITION_BASE_URL", None)
             os.environ.pop("FUB_DUTIES_BASE_URL", None)
+            os.environ.pop("FUB_NABU_CASA_URL", None)
 
 
 def should_run_now(settings: dict, now: datetime) -> bool:

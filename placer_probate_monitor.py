@@ -456,7 +456,7 @@ def listing_from_row(row: dict, run_date: str) -> dict:
         str(row.get("decedent") or "").strip()
         or str(row.get("decedent_name") or "").strip()
     )
-    return {
+    record = {
         "case_number": case,
         "date": str(row.get("post_date") or row.get("filed") or "").strip(),
         "filed": str(row.get("filed") or row.get("filed_from_docket") or "").strip(),
@@ -475,6 +475,19 @@ def listing_from_row(row: dict, run_date: str) -> dict:
         "status": str(row.get("status") or "").strip(),
         "last_collected": run_date,
     }
+    documents = _listing_documents(row)
+    if documents:
+        record["documents"] = documents
+    return record
+
+
+def _listing_documents(row: dict) -> list[dict]:
+    try:
+        from .fub_client import listing_document_links
+    except ImportError:
+        from fub_client import listing_document_links
+
+    return listing_document_links(row)
 
 
 def _read_listings_catalog(path: Path) -> dict[str, dict]:

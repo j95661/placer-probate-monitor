@@ -2070,23 +2070,207 @@ def petition_file_token(case: str, secret: str | None = None, *, kind: str = "de
     ).hexdigest()[:32]
 
 
-def petition_public_uri(case: str) -> str:
-    return form_public_uri(case, "de111")
+def petition_public_uri(case: str, nabu_base: str | None = None) -> str:
+    return form_public_uri(case, "de111", nabu_base)
 
 
-def duties_public_uri(case: str) -> str:
-    return form_public_uri(case, "de147")
+def duties_public_uri(case: str, nabu_base: str | None = None) -> str:
+    return form_public_uri(case, "de147", nabu_base)
 
 
-def form_public_uri(case: str, kind: str) -> str:
+def _document_base():
+    try:
+        from . import document_base as module
+    except ImportError:
+        import document_base as module
+
+    return module
+
+
+def configured_form_base(kind: str, nabu_base: str | None = None) -> str:
+    """DE-111 / DE-147 base. A Nabu Casa origin replaces a LAN base."""
     if kind == "de147":
-        base = str(os.environ.get("FUB_DUTIES_BASE_URL") or "").rstrip("/")
+        configured = str(os.environ.get("FUB_DUTIES_BASE_URL") or "").strip()
     else:
-        base = str(os.environ.get("FUB_PETITION_BASE_URL") or "").rstrip("/")
+        configured = str(os.environ.get("FUB_PETITION_BASE_URL") or "").strip()
+    nabu = str(nabu_base or os.environ.get("FUB_NABU_CASA_URL") or "").strip()
+    return _document_base().choose_document_base(nabu, configured)
+
+
+def form_public_uri(case: str, kind: str, nabu_base: str | None = None) -> str:
+    base = configured_form_base(kind, nabu_base).rstrip("/")
     if not base:
         return ""
     safe = petition_safe_case(case)
     return f"{base}/{petition_file_token(case, kind=kind)}/{safe}.pdf"
+
+
+def _publicize_document_url(url: str, nabu_base: str | None = None) -> str:
+    text = str(url or "").strip()
+    if not text:
+        return ""
+    module = _document_base()
+    nabu = str(nabu_base or os.environ.get("FUB_NABU_CASA_URL") or "").strip()
+    configured = str(os.environ.get("FUB_PETITION_BASE_URL") or "").strip()
+    target = module.choose_document_base(nabu, configured)
+    if module.is_nabu_casa_ui_url(target):
+        return module.public_document_url(text, target)
+    return text
+
+
+def listing_document_links(row: dict, nabu_base: str | None = None) -> list[dict]:
+    """Public DE-111 / DE-147 links for one probate listing.
+
+    Links that already point at a LAN Home Assistant address are rewritten to
+    the Nabu Casa origin when one is configured. Court-portal download URLs
+    are left alone.
+    """
+    case = case_key(row)
+    links: list[dict] = []
+    seen: set[str] = set()
+
+    def add(label: str, url: str) -> None:
+        raw = str(url or "").strip()
+        if "/api/placer_probate_monitor/" not in raw:
+            return
+        public = _publicize_document_url(raw, nabu_base)
+        if not public:
+            return
+        marker = "/api/placer_probate_monitor/"
+        idx = public.find(marker)
+        key = public[idx:] if idx >= 0 else public
+        if key in seen:
+            return
+        seen.add(key)
+        links.append({"label": label or "Document", "url": public})
+
+    for key, label in (("de111_url", "DE-111"), ("de147_url", "DE-147")):
+        add(label, str(row.get(key) or ""))
+    for doc in row.get("documents") or []:
+        if isinstance(doc, str):
+            add("Document", doc)
+        elif isinstance(doc, dict):
+            add(
+                str(doc.get("label") or doc.get("name") or "Document"),
+                str(doc.get("url") or doc.get("href") or ""),
+            )
+    for doc in row.get("document_files") or []:
+        if not isinstance(doc, dict):
+            continue
+        add(
+            str(doc.get("name") or doc.get("label") or "Document"),
+            str(doc.get("url") or ""),
+        )
+    if case:
+        if not any(item["label"] == "DE-111" for item in links) and _petition_pdf_path(row):
+            add("DE-111", form_public_uri(case, "de111", nabu_base))
+        if not any(item["label"] == "DE-147" for item in links) and _duties_pdf_path(row):
+            add("DE-147", form_public_uri(case, "de147", nabu_base))
+    return links
+
+
+def _absolute_document_href(url: str, nabu: str) -> str:
+    """Absolute Nabu Casa document URL, or ``""`` when that host is unknown.
+
+    A private IP, localhost, relative ``/api`` path, or ``host:8123`` is never
+    returned. Court URLs that are already public stay unchanged.
+    """
+    module = _document_base()
+    text = str(url or "").strip()
+    if not text:
+        return ""
+    if module.is_nabu_casa_ui_url(nabu):
+        rewritten = module.public_document_url(text, nabu)
+        if module.is_nabu_casa_ui_url(rewritten):
+            return rewritten
+        path = module.document_api_path(text) or module.document_api_path(rewritten)
+        origin = module.nabu_casa_origin(nabu)
+        if origin and path.startswith("/"):
+            return f"{origin}{path}"
+        if rewritten and not module.should_rewrite_document_url(rewritten):
+            return rewritten
+        return ""
+    if module.should_rewrite_document_url(text):
+        return ""
+    return text
+
+
+def _is_private_document_href(url: str) -> bool:
+    module = _document_base()
+    text = str(url or "").strip()
+    if not text or text.startswith("/api/"):
+        return False
+    if "/api/placer_probate_monitor/" not in text and "://" not in text and ":8123" not in text:
+        return False
+    return module.should_rewrite_document_url(text)
+
+
+def _purge_private_hrefs(value, key: str = ""):
+    """Drop private document hrefs. ``path`` keeps the API path only."""
+    if key == "path":
+        return value
+    if isinstance(value, str):
+        return "" if _is_private_document_href(value) else value
+    if isinstance(value, list):
+        return [_purge_private_hrefs(item) for item in value]
+    if isinstance(value, dict):
+        return {name: _purge_private_hrefs(item, name) for name, item in value.items()}
+    return value
+
+
+def publicize_listing_row(row: dict, nabu_base: str | None = None) -> dict:
+    """Listing row whose Documents hrefs are absolute Nabu Casa URLs.
+
+    ``de111_url``, ``de147_url``, and ``documents`` are what the listings
+    panel prints in the Documents column. A stored LAN address on any of
+    them is rewritten when a Nabu Casa host is known. When it is not, the
+    private IP is removed instead of being returned as the href. ``path``
+    keeps ``/api/placer_probate_monitor/...`` so the panel can still build
+    an absolute remote URL from Home Assistant Cloud.
+    """
+    item = dict(row or {})
+    module = _document_base()
+    nabu = str(nabu_base or os.environ.get("FUB_NABU_CASA_URL") or "").strip()
+    if not module.is_nabu_casa_ui_url(nabu):
+        nabu = ""
+    documents = listing_document_links(item, nabu or None)
+    if documents:
+        item["documents"] = documents
+
+    def stash(raw: str) -> tuple[str, str]:
+        text = str(raw or "").strip()
+        return _absolute_document_href(text, nabu), module.document_api_path(text)
+
+    for key in ("de111_url", "de147_url"):
+        url, path = stash(str(item.get(key) or ""))
+        if url or path or item.get(key):
+            item[key] = url
+        if path:
+            item[key.replace("_url", "_path")] = path
+    rewritten: list[dict] = []
+    for doc in item.get("documents") or []:
+        if isinstance(doc, str):
+            raw = doc
+            label = "Document"
+            clone = {"label": label}
+        elif isinstance(doc, dict):
+            raw = str(doc.get("url") or doc.get("href") or "")
+            clone = dict(doc)
+            label = str(clone.get("label") or clone.get("name") or "Document")
+            clone["label"] = label
+        else:
+            continue
+        url, path = stash(raw)
+        if not url and not path:
+            continue
+        clone["url"] = url
+        if path:
+            clone["path"] = path
+        clone.pop("href", None)
+        rewritten.append(clone)
+    if rewritten:
+        item["documents"] = rewritten
+    return _purge_private_hrefs(item)
 
 
 def _petition_pdf_path(row: dict) -> Path | None:

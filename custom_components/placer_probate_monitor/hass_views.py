@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -49,7 +51,9 @@ from .fub_client import (
     sources_payload,
 )
 
-PANEL_JS_VERSION = "1.3.63"
+PANEL_JS_VERSION = "1.3.66"
+
+_LOGGER = logging.getLogger(__name__)
 
 WWW = Path(__file__).resolve().parent / "www"
 MAP_HTML = WWW / "fub_map.html"
@@ -555,17 +559,43 @@ class ListingsView(HomeAssistantView):
         self.hass = hass
 
     async def get(self, request):
-        payload = await self.hass.async_add_executor_job(_listings_payload, self.hass)
+        # Resolve Nabu Casa on the event loop. The listings payload runs in
+        # an executor, and importing the cloud integration there can miss the
+        # live remote UI URL, leaving document hrefs on the LAN address.
+        from .document_base import peek_nabu_casa_origin
+
+        request_url = ""
+        try:
+            request_url = str(request.url)
+        except Exception:  # noqa: BLE001
+            request_url = ""
+        hinted = peek_nabu_casa_origin(self.hass, request_url)
+        payload = await self.hass.async_add_executor_job(
+            _listings_payload, self.hass, hinted
+        )
         return self.json(payload)
 
 
-def _listings_payload(hass: HomeAssistant) -> dict:
+def _listings_payload(hass: HomeAssistant, hinted: str = "") -> dict:
+    from .document_base import apply_document_base, discover_nabu_origin
+    from .fub_client import publicize_listing_row
     from .placer_probate_monitor import (
         _read_listings_catalog,
         merge_listings,
     )
 
     data_dir = Path(hass.config.path(DOMAIN))
+    os.environ["FUB_PETITION_DOCS_DIR"] = str(data_dir / "reports" / "docs")
+    entry = _entry(hass)
+    if entry:
+        os.environ["FUB_PETITION_TOKEN_SECRET"] = entry.entry_id
+    # Keep FUB base env in sync, then pick the document host again. A private
+    # internal_url or get_url result must not become the Documents href when
+    # cloud remote_domain / remote_ui / .storage/cloud has the remote UI.
+    apply_document_base(hass, hinted)
+    origin, error = discover_nabu_origin(hass, hinted)
+    if error:
+        _LOGGER.warning("Probate listing documents: %s", error)
     path = data_dir / "listings.json"
     catalog = _read_listings_catalog(path)
     reports = data_dir / "reports"
@@ -593,7 +623,13 @@ def _listings_payload(hass: HomeAssistant) -> dict:
         ),
         reverse=True,
     )
-    return {"count": len(listings), "listings": listings}
+    public_rows = [publicize_listing_row(item, origin) for item in listings]
+    return {
+        "count": len(public_rows),
+        "document_base": origin,
+        "document_base_error": error,
+        "listings": public_rows,
+    }
 
 
 def _register_panel(hass: HomeAssistant, url_path: str, title: str, icon: str, element: str) -> None:

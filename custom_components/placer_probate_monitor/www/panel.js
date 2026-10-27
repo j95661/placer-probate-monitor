@@ -1342,6 +1342,151 @@ class PlacerProbateFubPanel extends HTMLElement {
 customElements.define("placer-probate-sources-panel", PlacerProbateSourcesPanel);
 customElements.define("placer-probate-fub-panel", PlacerProbateFubPanel);
 
+function ppmNabuOrigin(base) {
+  const text = String(base || "").trim();
+  if (!text) return "";
+  try {
+    const url = new URL(text.indexOf("://") === -1 ? "https://" + text : text);
+    const host = url.hostname.toLowerCase();
+    if (host === "ui.nabu.casa" || host.endsWith(".ui.nabu.casa")) {
+      return "https://" + host;
+    }
+  } catch (err) {
+    return "";
+  }
+  return "";
+}
+
+function ppmIsLocalDocumentHost(host, port) {
+  const name = String(host || "").toLowerCase().replace(/\.$/, "");
+  if (!name) return false;
+  if (
+    name === "localhost" ||
+    name === "homeassistant" ||
+    name === "hassio" ||
+    name.endsWith(".local") ||
+    name.endsWith(".lan") ||
+    name.endsWith(".home") ||
+    name.endsWith(".localdomain") ||
+    name.indexOf(".") === -1
+  ) {
+    return true;
+  }
+  if (String(port || "") === "8123") return true;
+  const ipv4 = name.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (!ipv4) return false;
+  const a = Number(ipv4[1]);
+  const b = Number(ipv4[2]);
+  if (a === 10 || a === 127 || a === 0 || a === 255) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 169 && b === 254) return true;
+  return false;
+}
+
+function ppmApiPath(url) {
+  const text = String(url || "").trim();
+  const marker = "/api/placer_probate_monitor/";
+  const idx = text.indexOf(marker);
+  if (idx >= 0) return text.slice(idx).split("#")[0];
+  if (text.startsWith("/") && !text.startsWith("//")) return text.split("#")[0];
+  return "";
+}
+
+async function ppmCloudRemoteOrigin(hass) {
+  if (!hass || typeof hass.callWS !== "function") return "";
+  try {
+    const status = await hass.callWS({ type: "cloud/status" });
+    if (!status || status.logged_in === false) return "";
+    const cert = status.remote_certificate || {};
+    const prefs = status.prefs || {};
+    const candidates = [
+      status.remote_domain,
+      status.remote_ui,
+      cert.common_name,
+      prefs.remote_domain,
+      prefs.remote_ui,
+    ];
+    (cert.alternative_names || []).forEach((name) => candidates.push(name));
+    for (let i = 0; i < candidates.length; i += 1) {
+      const origin = ppmNabuOrigin(candidates[i]);
+      if (origin) return origin;
+    }
+  } catch (err) {
+    return "";
+  }
+  return "";
+}
+
+function ppmDocumentHref(url, documentBase, pathHint) {
+  const origin = ppmNabuOrigin(documentBase);
+  const path = ppmApiPath(pathHint) || ppmApiPath(url);
+  if (origin && path.indexOf("/api/placer_probate_monitor/") === 0) {
+    return origin + path;
+  }
+  const raw = String(url || "").trim();
+  if (!raw) return "";
+  let parsed;
+  try {
+    parsed = new URL(raw.indexOf("://") === -1 ? "http://" + raw : raw);
+  } catch (err) {
+    return "";
+  }
+  const host = parsed.hostname.toLowerCase();
+  if (host === "ui.nabu.casa" || host.endsWith(".ui.nabu.casa")) {
+    const suffix = parsed.pathname + parsed.search + parsed.hash;
+    return (origin || ("https://" + host)) + suffix;
+  }
+  if (ppmIsLocalDocumentHost(host, parsed.port)) return "";
+  if (origin && path) return origin + path;
+  return /^https?:\/\//i.test(raw) ? raw : "";
+}
+
+function ppmListingDocs(row, documentBase) {
+  const docs = [];
+  const push = (label, url, pathHint) => {
+    const href = ppmDocumentHref(url, documentBase, pathHint);
+    if (!href || !/^https?:\/\//i.test(href)) return;
+    let host = "";
+    let port = "";
+    try {
+      const parsed = new URL(href);
+      host = parsed.hostname;
+      port = parsed.port;
+    } catch (err) {
+      return;
+    }
+    if (ppmIsLocalDocumentHost(host, port)) return;
+    const nabu = host === "ui.nabu.casa" || host.endsWith(".ui.nabu.casa");
+    if (href.indexOf("/api/placer_probate_monitor/") >= 0 && !nabu) return;
+    docs.push({ label: label || "Document", url: href });
+  };
+  (row.documents || []).forEach((doc) => {
+    if (typeof doc === "string") push("Document", doc, "");
+    else if (doc) push(doc.label || doc.name || "Document", doc.url || doc.href, doc.path);
+  });
+  push("DE-111", row.de111_url, row.de111_path);
+  push("DE-147", row.de147_url, row.de147_path);
+  const seen = new Set();
+  return docs.filter((doc) => {
+    if (seen.has(doc.url)) return false;
+    seen.add(doc.url);
+    return true;
+  });
+}
+
+function ppmListingDocText(row, documentBase) {
+  return ppmListingDocs(row, documentBase).map((doc) => doc.label + " " + doc.url).join(" ");
+}
+
+function ppmListingDocCell(row, documentBase) {
+  const docs = ppmListingDocs(row, documentBase);
+  if (!docs.length) return "—";
+  return docs.map((doc) =>
+    `<div><a href="${ppmEsc(doc.url)}" target="_blank" rel="noopener">${ppmEsc(doc.label)}</a><div class="ppm-note">${ppmEsc(doc.url)}</div></div>`
+  ).join("");
+}
+
 class PlacerProbateListingsPanel extends HTMLElement {
   constructor() {
     super();
@@ -1349,6 +1494,7 @@ class PlacerProbateListingsPanel extends HTMLElement {
     this._ready = false;
     this._rows = [];
     this._query = "";
+    this._documentBase = "";
   }
 
   set hass(hass) {
@@ -1380,7 +1526,7 @@ class PlacerProbateListingsPanel extends HTMLElement {
       <div class="ppm-wrap">
         <header>
           <h1>Probate listings</h1>
-          <p>Collected Placer cases. Date is the newspaper notice date. Source is the county import. Decedent address is DE-111 item 3.a.(2) when marked, else 3c. Not the “at (place)” death location.</p>
+          <p>Collected Placer cases. Date is the newspaper notice date. Source is the county import. Decedent address is DE-111 item 3.a.(2) when marked, else 3c. Not the “at (place)” death location. Document links use the Nabu Casa remote URL when Home Assistant Cloud is configured.</p>
         </header>
         <main class="ppm-listings">
           <div id="flash" class="ppm-banner"></div>
@@ -1417,6 +1563,7 @@ class PlacerProbateListingsPanel extends HTMLElement {
       const blob = [
         row.case_number, row.date, row.source, row.petitioner, row.decedent,
         row.decedent_address, row.petitioner_address, row.newspaper, row.filed,
+        ppmListingDocText(row, this._documentBase),
       ].map((item) => String(item || "").toLowerCase()).join(" ");
       return blob.includes(q);
     });
@@ -1442,6 +1589,7 @@ class PlacerProbateListingsPanel extends HTMLElement {
         <td>${ppmEsc(row.petitioner || "—")}<div class="ppm-note">${ppmEsc(row.petitioner_address || "")}</div></td>
         <td>${ppmEsc(row.decedent || "—")}</td>
         <td>${ppmEsc(row.decedent_address || "—")}</td>
+        <td>${ppmListingDocCell(row, this._documentBase)}</td>
       </tr>`;
     }).join("");
     this._qs("#listing-table").innerHTML = `
@@ -1454,6 +1602,7 @@ class PlacerProbateListingsPanel extends HTMLElement {
             <th>Petitioner</th>
             <th>Decedent</th>
             <th>Decedent address</th>
+            <th>Documents</th>
           </tr>
         </thead>
         <tbody>${body}</tbody>
@@ -1464,10 +1613,19 @@ class PlacerProbateListingsPanel extends HTMLElement {
   async _load() {
     this._flash("Loading collected listings…", true);
     try {
-      const data = await this._hass.callApi("GET", "placer_probate_monitor/listings");
+      const listingsCall = this._hass.callApi("GET", "placer_probate_monitor/listings");
+      const cloudCall = ppmCloudRemoteOrigin(this._hass);
+      const data = await listingsCall;
+      const cloudOrigin = await cloudCall;
+      this._documentBase = ppmNabuOrigin(data.document_base) || cloudOrigin || "";
       this._rows = data.listings || [];
       this._renderTable();
-      this._flash(`Loaded ${this._rows.length} collected listing${this._rows.length === 1 ? "" : "s"}.`, true);
+      const count = `Loaded ${this._rows.length} collected listing${this._rows.length === 1 ? "" : "s"}.`;
+      if (!this._documentBase && data.document_base_error) {
+        this._flash(`${count} ${data.document_base_error}`, false);
+      } else {
+        this._flash(count, true);
+      }
     } catch (err) {
       this._flash(ppmText(err), false);
     }
