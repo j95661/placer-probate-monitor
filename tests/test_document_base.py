@@ -656,6 +656,118 @@ class DocumentBaseTests(unittest.TestCase):
             self.assertNotIn(":8123", href)
         self.assertTrue(any(doc.get("path", "").startswith("/api/placer_probate_monitor/") for doc in row["documents"]))
 
+    def test_155_listing_href_is_nabu_when_get_url_is_private(self):
+        """1.3.155 form_api_uri returns a relative /api path.
+
+        Home Assistant get_url and internal_url are private, which is what the
+        browser uses when the listings page is opened on the LAN. With cloud
+        remote_domain or remote_ui set, the Documents href must be an absolute
+        https://*.ui.nabu.casa/api/placer_probate_monitor/de111|de147 URL.
+        """
+        import subprocess
+
+        script = r"""
+import os, sys, types
+from pathlib import Path
+sys.path.insert(0, os.environ["PPM_COMPONENT"])
+
+PRIVATE = "http://192.168.1.23:8123"
+network = types.ModuleType("homeassistant.helpers.network")
+network.get_url = lambda hass, **kwargs: PRIVATE
+cloud_mod = types.ModuleType("homeassistant.components.cloud")
+cloud_mod.async_remote_ui_url = lambda hass: "http://10.0.0.8:8123"
+helpers = types.ModuleType("homeassistant.helpers")
+components = types.ModuleType("homeassistant.components")
+ha = types.ModuleType("homeassistant")
+helpers.network = network
+components.cloud = cloud_mod
+ha.helpers = helpers
+ha.components = components
+sys.modules["homeassistant"] = ha
+sys.modules["homeassistant.helpers"] = helpers
+sys.modules["homeassistant.helpers.network"] = network
+sys.modules["homeassistant.components"] = components
+sys.modules["homeassistant.components.cloud"] = cloud_mod
+
+from document_base import discover_nabu_origin, listing_document_href
+from placer_probate_monitor import stamp_listing_doc_urls
+
+class Fake:
+    def __init__(self, cloud):
+        self.config = type("C", (), {"external_url": PRIVATE, "internal_url": "http://10.0.0.8:8123"})()
+        self.data = {"cloud": cloud}
+
+def check(label, cloud):
+    hass = Fake(cloud)
+    origin, error = discover_nabu_origin(hass, PRIVATE + "/api/placer_probate_monitor/listings")
+    assert origin.startswith("https://") and origin.endswith(".ui.nabu.casa"), (label, origin, error)
+    assert "192.168" not in origin and ":8123" not in origin
+    stored = PRIVATE + "/api/placer_probate_monitor/de111/old/S-PR-9.pdf"
+    rewritten = listing_document_href(stored, origin)
+    assert rewritten.startswith(origin + "/api/placer_probate_monitor/de111/"), rewritten
+    assert "192.168" not in rewritten and ":8123" not in rewritten and "hooks.nabu.casa" not in rewritten
+    root = Path("/tmp") / ("ppm155-" + label)
+    docs = root / "reports" / "docs" / "S-PR-9"
+    docs.mkdir(parents=True, exist_ok=True)
+    (docs / "S-PR-9_DE-111.pdf").write_bytes(b"%PDF-1.4\n1\n")
+    (docs / "S-PR-9_DE-147.pdf").write_bytes(b"%PDF-1.4\n1\n")
+    row = stamp_listing_doc_urls(
+        {
+            "case_number": "S-PR-9",
+            "source_id": "placer",
+            "de111_url": stored,
+            "de147_url": "http://192.168.0.60:8123/api/placer_probate_monitor/de147/old/S-PR-9.pdf",
+            "docs": [{"label": "DE-111", "url": stored}],
+        },
+        root,
+        origin,
+    )
+    hrefs = [item["url"] for item in row["docs"]]
+    hrefs.extend([row["de111_url"], row["de147_url"]])
+    assert hrefs, label
+    kinds = set()
+    for href in hrefs:
+        assert href.startswith(origin + "/api/placer_probate_monitor/"), (label, href)
+        assert href.startswith("https://"), href
+        assert not href.startswith("/"), href
+        assert "192.168" not in href and "10.0.0.8" not in href, href
+        assert ":8123" not in href and "localhost" not in href, href
+        assert "hooks.nabu.casa" not in href, href
+        if "/de111/" in href:
+            kinds.add("de111")
+        if "/de147/" in href:
+            kinds.add("de147")
+    assert kinds == {"de111", "de147"}, (label, hrefs)
+
+check("domain", type("R", (), {
+    "remote": type("Remote", (), {"remote_domain": "house.ui.nabu.casa", "remote_ui": None, "instance_domain": None})(),
+    "client": type("Client", (), {"prefs": type("P", (), {"_prefs": {}})()})(),
+})())
+check("remote_ui", type("R", (), {
+    "remote": type("Remote", (), {"remote_domain": None, "remote_ui": "https://cabin.ui.nabu.casa", "instance_domain": None})(),
+    "client": type("Client", (), {"prefs": type("P", (), {"_prefs": {}})()})(),
+})())
+print("ok")
+"""
+        env = os.environ.copy()
+        component = str(ROOT / "custom_components" / "placer_probate_monitor")
+        env["PYTHONPATH"] = component
+        env["PPM_COMPONENT"] = component
+        proc = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=str(ROOT),
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(
+            proc.returncode,
+            0,
+            proc.stdout + "\n" + proc.stderr,
+        )
+        self.assertIn("ok", proc.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

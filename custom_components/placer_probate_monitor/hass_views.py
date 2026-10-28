@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import json
+import logging
 import re
 from pathlib import Path
 
@@ -80,7 +81,9 @@ from .fub_client import (
     FUB_GO_GATE_FIELDS,
 )
 
-PANEL_JS_VERSION = "1.3.155"
+PANEL_JS_VERSION = "1.3.156"
+
+_LOGGER = logging.getLogger(__name__)
 
 WWW = Path(__file__).resolve().parent / "www"
 MAP_HTML = WWW / "fub_map.html"
@@ -1046,7 +1049,13 @@ class ListingsView(HomeAssistantView):
         self.hass = hass
 
     async def get(self, request):
-        payload = await self.hass.async_add_executor_job(_listings_payload, self.hass)
+        # Resolve Nabu Casa on the event loop. Importing the cloud integration
+        # inside the listings executor can miss the live remote UI URL and
+        # leave document hrefs on the LAN address that opened this page.
+        hinted = _request_nabu_hint(self.hass, request)
+        payload = await self.hass.async_add_executor_job(
+            _listings_payload, self.hass, hinted
+        )
         payload.update(_listings_share_meta(self.hass))
         return self.json(payload)
 
@@ -1107,10 +1116,37 @@ class FubReviewXlsxView(HomeAssistantView):
         )
 
 
-def _listings_payload(hass: HomeAssistant) -> dict:
+def _request_nabu_hint(hass: HomeAssistant, request) -> str:
+    from .document_base import peek_nabu_casa_origin
+
+    request_url = ""
+    try:
+        request_url = str(request.url)
+    except Exception:  # noqa: BLE001
+        request_url = ""
+    return peek_nabu_casa_origin(hass, request_url)
+
+
+def _nabu_document_origin(hass: HomeAssistant, hinted: str = "") -> tuple[str, str]:
+    from .document_base import apply_document_base, discover_nabu_origin
+
+    apply_document_base(hass, hinted)
+    origin, error = discover_nabu_origin(hass, hinted)
+    if error:
+        _LOGGER.warning("Probate listing documents: %s", error)
+    return origin, error
+
+
+def _listings_payload(hass: HomeAssistant, hinted: str = "") -> dict:
     from .placer_probate_monitor import build_listings_payload
 
-    return build_listings_payload(Path(hass.config.path(DOMAIN)))
+    origin, error = _nabu_document_origin(hass, hinted)
+    payload = build_listings_payload(
+        Path(hass.config.path(DOMAIN)), document_base=origin
+    )
+    payload["document_base"] = origin
+    payload["document_base_error"] = error
+    return payload
 
 
 def _listings_export_bytes(hass: HomeAssistant, query, fmt: str) -> bytes:
@@ -1121,7 +1157,10 @@ def _listings_export_bytes(hass: HomeAssistant, query, fmt: str) -> bytes:
         listings_xlsx_bytes,
     )
 
-    payload = build_listings_payload(Path(hass.config.path(DOMAIN)))
+    origin, _error = _nabu_document_origin(hass)
+    payload = build_listings_payload(
+        Path(hass.config.path(DOMAIN)), document_base=origin
+    )
     rows = filter_listings(
         payload.get("listings") or [],
         query=str(query.get("q") or ""),
@@ -1142,7 +1181,8 @@ def _fub_review_export_bytes(hass: HomeAssistant, query, fmt: str) -> bytes:
     )
 
     data_dir = Path(hass.config.path(DOMAIN))
-    payload = build_listings_payload(data_dir)
+    origin, _error = _nabu_document_origin(hass)
+    payload = build_listings_payload(data_dir, document_base=origin)
     rows = filter_listings(
         payload.get("listings") or [],
         query=str(query.get("q") or ""),
@@ -1361,7 +1401,10 @@ class ListingsPublicView(HomeAssistantView):
         if status:
             payload, code = listings_share_http_error(status)
             return self.json(payload, status_code=code)
-        data = await self.hass.async_add_executor_job(_listings_payload, self.hass)
+        hinted = _request_nabu_hint(self.hass, request)
+        data = await self.hass.async_add_executor_job(
+            _listings_payload, self.hass, hinted
+        )
         want_json = str(request.query.get("format") or "").lower() == "json" or (
             "application/json" in str(request.headers.get("Accept") or "").lower()
             and "text/html" not in str(request.headers.get("Accept") or "").lower()
