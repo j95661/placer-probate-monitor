@@ -14,8 +14,29 @@ import requests
 
 try:
     from .petition_parse import STATE_ALT as _STATE_ALT
+    from .petition_parse import clean_person_name as _clean_person_name
+    from .petition_parse import is_caption_name_part as _is_caption_name_part
+    from .petition_parse import is_caption_person_name as _is_caption_person_name
+    from .petition_parse import is_court_or_firm_caption_name as _is_court_or_firm_caption_name
+    from .petition_parse import is_junk_mailing_street as _is_junk_mailing_street
+    from .petition_parse import is_placeholder_estate_real as _is_placeholder_estate_real
+    from .petition_parse import stored_person_name as _stored_person_name
+    from .petition_parse import strip_ocr_name_junk as _strip_ocr_name_junk
 except ImportError:
     from petition_parse import STATE_ALT as _STATE_ALT
+    from petition_parse import clean_person_name as _clean_person_name
+    from petition_parse import is_caption_name_part as _is_caption_name_part
+    from petition_parse import is_caption_person_name as _is_caption_person_name
+    from petition_parse import is_court_or_firm_caption_name as _is_court_or_firm_caption_name
+    from petition_parse import is_junk_mailing_street as _is_junk_mailing_street
+    from petition_parse import is_placeholder_estate_real as _is_placeholder_estate_real
+    from petition_parse import stored_person_name as _stored_person_name
+    from petition_parse import strip_ocr_name_junk as _strip_ocr_name_junk
+
+try:
+    from .datasources import COUNTY_FUB_LEAD_SOURCES, fub_lead_source, petition_docs_dir
+except ImportError:
+    from datasources import COUNTY_FUB_LEAD_SOURCES, fub_lead_source, petition_docs_dir
 
 
 def _progress_fub(summary: dict, action: str, key: str | None = None) -> None:
@@ -40,12 +61,15 @@ def _progress_fub(summary: dict, action: str, key: str | None = None) -> None:
 
 COURT_SEARCH_DEFAULT = "https://webportal.placerco.org/eCourtPublic/?q=node/48"
 CASE_PORTAL_TEMPLATE = "https://webportal.placerco.org/eCourtPublic/?q=node/45/{nid}"
-SACRAMENTO_COURT_SEARCH = (
-    "https://prod-portal-sacramento-ca.journaltech.com/public-portal/?q=node/429"
-)
 CASE_PORTAL_RE = re.compile(r"node/45/(\d+)", re.I)
+SACRAMENTO_PORTAL_BASE = (
+    "https://prod-portal-sacramento-ca.journaltech.com/public-portal/"
+)
+SACRAMENTO_CASE_RE = re.compile(
+    r"prod-portal-sacramento-ca\.journaltech\.com/public-portal/.*?node/(?:397|430)/(\d+)",
+    re.I,
+)
 DOWNLOAD_CASE_RE = re.compile(r"downloadFile/\d+/(\d+)", re.I)
-SACRAMENTO_SUMMARY_RE = re.compile(r"node/397/\d+", re.I)
 MAPPING_PATH = Path(__file__).resolve().parent / "fub_mapping.yaml"
 ADDR_RE = re.compile(
     rf"^(?P<street>.+?),\s*(?P<city>[^,]+),\s*"
@@ -72,19 +96,8 @@ ADDRESS1_TYPE = "home"
 ADDRESS2_TYPE = "mailing"
 
 
-def _is_sacramento_summary_url(text: str) -> bool:
-    low = text.lower()
-    if not SACRAMENTO_SUMMARY_RE.search(text):
-        return False
-    return "journaltech.com" in low or "sacramento" in low
-
-
 def case_portal_url(row: dict) -> str:
-    """Per-case public portal page.
-
-    Placer summaries are rewritten to node/45/{id}. A Sacramento
-    node/397 URL is returned unchanged and is never rewritten to Placer.
-    """
+    """Per-case court page. Placer uses node/45. Sacramento keeps node/397."""
     candidates = [
         row.get("court_url"),
         row.get("url"),
@@ -98,7 +111,10 @@ def case_portal_url(row: dict) -> str:
         text = str(raw or "").strip()
         if not text:
             continue
-        if _is_sacramento_summary_url(text):
+        sac = SACRAMENTO_CASE_RE.search(text)
+        if sac:
+            return f"{SACRAMENTO_PORTAL_BASE}?q=node/397/{sac.group(1)}"
+        if "prod-portal-sacramento-ca.journaltech.com" in text.lower():
             return text
         match = CASE_PORTAL_RE.search(text)
         if match:
@@ -107,52 +123,6 @@ def case_portal_url(row: dict) -> str:
         if match:
             return CASE_PORTAL_TEMPLATE.format(nid=match.group(1))
     return ""
-
-
-def _datasources():
-    try:
-        from . import datasources as module
-    except ImportError:
-        import datasources as module
-
-    return module
-
-
-def _row_source_key(row: dict) -> str:
-    explicit = str(row.get("source_id") or "").strip()
-    if explicit:
-        return _datasources().county_key(explicit)
-    tags = [str(item).strip().lower() for item in (row.get("tags") or [])]
-    if "sacramento" in tags:
-        return "sacramento"
-    url = str(row.get("court_url") or "")
-    if "journaltech.com" in url.lower() and "sacramento" in url.lower():
-        return "sacramento"
-    county = str(row.get("court_county") or os.environ.get("PROBATE_COUNTY") or "")
-    return _datasources().county_key(county)
-
-
-def _row_fub_tags(row: dict) -> list[str]:
-    raw = row.get("tags")
-    if isinstance(raw, (list, tuple)):
-        tags = [str(item).strip() for item in raw if str(item).strip()]
-        if tags:
-            return tags
-    elif isinstance(raw, str) and raw.strip():
-        return [part.strip() for part in raw.split(",") if part.strip()]
-    try:
-        return _datasources().fub_tags(_row_source_key(row) or "placer")
-    except ValueError:
-        return ["probate"]
-
-
-def _merge_tag_list(existing: list[str], extra: str) -> list[str]:
-    merged = list(existing)
-    for part in str(extra or "").split(","):
-        part = part.strip()
-        if part and part not in merged:
-            merged.append(part)
-    return merged
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -597,6 +567,16 @@ PROBATE_SOURCE_FIELDS = [
         "custom": True,
     },
     {
+        "key": "de150_url",
+        "label": "Letters of Administration PDF URL",
+        "group": "other",
+        "notes_label": "Letters",
+        "source": "Home Assistant API URL for the stored issued letters (DE-150)",
+        "notes": "Signed download URL. Included in Notes when the letters PDF is on disk.",
+        "person": None,
+        "custom": True,
+    },
+    {
         "key": "filed",
         "label": "Filed date",
         "group": "other",
@@ -810,26 +790,49 @@ SEND_TOGGLES = [
     },
 ]
 
+MIN_ESTATE_REAL_GMV = 200_000
+NOGO_ESTATE_REAL_BELOW_MIN = "estate_real_below_minimum"
+NOGO_MISSING_ESTATE_REAL = "missing_estate_real"
+FUB_GO_ALWAYS_NOGO = [
+    {
+        "key": "estate_real",
+        "label": "Real property GMV at least $200,000",
+        "from": "DE-111 gross fair market value of real property",
+        "when": "Always. Missing or blank GMV is NO-GO. Tiny OCR crumbs ($1/$2/$6/$9) count as missing. Under $200,000 (including $0) is NO-GO. Annual income from real property is not this gate.",
+    },
+    {
+        "key": "professional_fiduciary",
+        "label": "Not a professional fiduciary",
+        "from": "CNPA / DE-111 item 2 / 2.b / item 8 / Public Administrator / CLPF / PFB",
+        "when": "Always. Fiduciary listings stay on the board as NO-GO and are not created or updated in Follow Up Boss.",
+    },
+    {
+        "key": "fub_removed",
+        "label": "Follow Up Boss person was not deleted",
+        "from": "Follow Up Boss GET person",
+        "when": "Always. A deleted person is marked fub_removed and is not recreated.",
+    },
+]
+
 GO_NO_GO = [
-    "Petitioner is the FUB Person. Decedent is never firstName/lastName.",
-    "No go-case without a petitioner mailing address on the extract. Map petitioner mailing and decedent last residence to Address 1 or Address 2 in the mapping UI. Item 1 is publication. Attorney caption is not petitioner mailing.",
+    "Petitioner is the FUB Person. Decedent is never firstName/lastName. Form captions (Estate Of, Case Number, Hearing Date, Dept, Petitioner, County Of, Superior Court, Decedent, Casenumber) are not person names.",
+    "NO-GO unless DE-111 gross fair market value of real property is present and at least $200,000. Missing, blank, tiny OCR crumbs ($1–$9), $0, and under $200,000 all fail. Annual gross income from real property is not this gate.",
+    "Go if Path A or Path B. Path A (same for Placer and Sacramento): real petitioner first, real petitioner last, and petitioner mailing street. Decedent residence is collected but not required on Path A unless checked. Path B: petitioner name (first+last or full petitioner), decedent name, decedent address (DE-111 3.a.(2)/3c / decedent_residence), and petitioner phone. Case number is never required for Go.",
+    "Path B does not require mailing. Path A does not require petitioner phone or decedent address. Map petitioner mailing and decedent last residence to Address 1 or Address 2 in the mapping UI. Item 1 is publication. Attorney caption is not petitioner mailing.",
     "Never map attorney_phone onto person.phones. Attorney caption address is not petitioner mailing.",
     "Last residence is DE-111 text, not a verified APN.",
-    "Notes gets the per-case eCourt Public URL, a unique DE-111 PDF link, and a DE-147 duties link. Petitioner phone and email come from either form when present, never from the attorney caption.",
+    "Notes gets the per-case eCourt Public URL, a unique DE-111 PDF link, a DE-147 duties link, and a Letters (DE-150) link when issued letters were downloaded. Petitioner phone and email come from either form when present, never from the attorney caption.",
     "Only NEW cases are created on a full run. Verify can update a person ID you enter, reuse the last test person, or create one if none exist.",
+    "Follow Up Boss person and event source is probate. Tags are probate plus the county name. Person updates use mergeTags=true so other tags are kept.",
+    "Skip Follow Up Boss create and update when the petitioner (or DE-111 item 2 / 2.b / item 8 petitioner row, or node/415 caption/parties) is a fiduciary: public administrator/guardian, professional or private professional fiduciary, CLPF / PFB license, licensed fiduciary bureau, Fiduciary Services, corporate trustee, or a bank/trust company named as personal representative. Family petitioners who are only a proposed administrator, attorney-caption wording, and will boilerplate such as \"bank or trust company\" are not a skip. Keep the listings row as no-go.",
 ]
 
 SOURCE_GO_NO_GO = {
     "placer": {
         "required": [
             {
-                "key": "case_number",
-                "label": "Case number",
-                "from": "CNPA notice / eCourt",
-            },
-            {
                 "key": "petitioner_first",
-                "label": "Petitioner first name",
+                "label": "Petitioner first name (real person, not a form caption)",
                 "from": "eCourt petitioner",
             },
             {
@@ -839,11 +842,17 @@ SOURCE_GO_NO_GO = {
             },
             {
                 "key": "mailing_address",
-                "label": "Petitioner address",
+                "label": "Petitioner mailing address (street, not caption or legal description)",
                 "from": "DE-111 item 8 / 3h or DE-147, whichever has it",
             },
         ],
         "optional": [
+            {
+                "key": "case_number",
+                "label": "Case number",
+                "from": "CNPA notice / eCourt",
+                "when": "Not required for Go. Posted to Follow Up Boss when present.",
+            },
             {
                 "key": "petitioner_email",
                 "label": "Petitioner email",
@@ -853,12 +862,13 @@ SOURCE_GO_NO_GO = {
                 "key": "petitioner_phone",
                 "label": "Petitioner phone",
                 "from": "DE-111 or DE-147, whichever has it",
+                "when": "Required on Path B. Not required on Path A.",
             },
             {
                 "key": "decedent_residence",
                 "label": "Estate location (3.a.(2))",
                 "from": "DE-111 item 3.a.(2) street; never 'at (place)'",
-                "when": "Required only if “Require decedent residence” is on",
+                "when": "Collected. Required on Path B (with decedent name and petitioner phone). Not required for Path A GO unless checked on Follow Up Boss → Required for Go",
             },
             {
                 "key": "court_url",
@@ -872,73 +882,200 @@ SOURCE_GO_NO_GO = {
     "sacramento": {
         "required": [
             {
-                "key": "case_number",
-                "label": "Case number",
-                "from": "CNPA notice (YYPR######)",
-            },
-            {
                 "key": "petitioner_first",
-                "label": "Petitioner first name",
-                "from": "Public case parties, else the notice",
+                "label": "Petitioner first name (real person, not a form caption)",
+                "from": "Published notice / portal parties",
             },
             {
                 "key": "petitioner_last",
                 "label": "Petitioner last name",
-                "from": "Public case parties, else the notice",
+                "from": "Published notice / portal parties",
+            },
+            {
+                "key": "mailing_address",
+                "label": "Petitioner mailing address (street, not caption or legal description)",
+                "from": "DE-111 item 8 / 3h or DE-147, whichever has it",
             },
         ],
         "optional": [
             {
-                "key": "hearing",
-                "label": "Hearing",
-                "from": "Public summary next event, else the notice",
+                "key": "case_number",
+                "label": "Case number",
+                "from": "CNPA notice / Sacramento portal",
+                "when": "Not required for Go. Posted to Follow Up Boss when present.",
+            },
+            {
+                "key": "petitioner_email",
+                "label": "Petitioner email",
+                "from": "DE-111 or DE-147, whichever has it",
+            },
+            {
+                "key": "petitioner_phone",
+                "label": "Petitioner phone",
+                "from": "DE-111 or DE-147, whichever has it",
+                "when": "Required on Path B. Not required on Path A.",
+            },
+            {
+                "key": "decedent_residence",
+                "label": "Estate location (3.a.(2))",
+                "from": "DE-111 item 3.a.(2) street; never 'at (place)'",
+                "when": "Collected. Required on Path B (with decedent name and petitioner phone). Not required for Path A GO unless checked on Follow Up Boss → Required for Go",
             },
             {
                 "key": "court_url",
-                "label": "Public case summary URL",
-                "from": "Journal Tech node/397/{id}. Left unchanged (not Placer node/45).",
-            },
-            {
-                "key": "parties",
-                "label": "Parties",
-                "from": "Logged-out case summary",
-            },
-            {
-                "key": "documents",
-                "label": "Document titles",
-                "from": "Public register. Not Viewable images are not downloaded.",
+                "label": "Sacramento case summary URL",
+                "from": "Journal Technologies node/397/{id}",
+                "when": "Posted to Follow Up Boss Notes when present. Never rewritten to Placer node/45.",
             },
         ],
-        "rules": [
-            "Petitioner is the FUB Person. Decedent is never firstName/lastName.",
-            "Tags sent with the person are probate and sacramento. Updates use mergeTags=true so existing Follow Up Boss tags stay.",
-            "CNPA search keyword is NOTICE OF PETITION. A card is kept only when the body contains PETITION TO ADMINISTER ESTATE.",
-            "Court lookup is the public Journal Technologies summary (node/397). Case search is node/429. No portal password is stored.",
-            "Petition PDFs and Not Viewable documents are not downloaded. Mailing address, phone, and email are not on the public summary, so they are not required for a go-case.",
-            "A published petition is not proof that real property is in the estate.",
-        ],
-    },
-    "nevada": {
-        "required": [],
-        "optional": [],
-        "rules": [
-            "Nevada County import is not live. Go/no-go data requirements will be listed here when this county is wired.",
+        "rules": GO_NO_GO + [
+            "Court summaries stay on prod-portal-sacramento-ca.journaltech.com node/397. Do not rewrite them to Placer node/45.",
+            "Public petition and duties PDFs are downloaded after portal login. Confidential Not Viewable documents, including DE-147S, are skipped.",
+            "Follow Up Boss tags are probate plus sacramento. Person updates use mergeTags=true so other tags are kept.",
+            "The same Follow Up Boss mapping and Events import path as Placer. Turning this source off does not stop Placer.",
         ],
     },
 }
 
+# Gate keys that already exist in gate_reason / SOURCE_GO_NO_GO. Do not invent new ones.
+FUB_GO_GATE_FIELDS = [
+    {"key": "petitioner_first", "label": "Petitioner first name (real person, not a form caption)"},
+    {"key": "petitioner_last", "label": "Petitioner last name"},
+    {"key": "mailing_address", "label": "Petitioner mailing address (street, not caption or legal description)"},
+    {"key": "decedent_residence", "label": "Estate location (decedent residence; collected, not required for GO unless checked)"},
+]
+FUB_GO_GATE_FIELD_KEYS = tuple(item["key"] for item in FUB_GO_GATE_FIELDS)
+DEFAULT_FUB_GO_REQUIRED_FIELDS = (
+    "petitioner_first",
+    "petitioner_last",
+    "mailing_address",
+)
 
-def go_no_go_for_source(source_id: str) -> dict:
+
+def normalize_fub_go_required_fields(value) -> list[str]:
+    """Keep only known Go-gate keys, in catalog order."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw = [part.strip() for part in value.replace(";", ",").split(",") if part.strip()]
+    elif isinstance(value, (list, tuple, set)):
+        raw = [str(item).strip() for item in value if str(item).strip()]
+    else:
+        raw = []
+    wanted = {item.lower().replace("-", "_") for item in raw}
+    wanted.discard("case_number")
+    return [key for key in FUB_GO_GATE_FIELD_KEYS if key in wanted]
+
+
+def resolve_fub_go_required_fields(
+    required_fields=None,
+    *,
+    strict_property: bool | None = None,
+    settings: dict | None = None,
+) -> list[str]:
+    """Saved checklist is the source of truth. Missing list uses production defaults.
+
+    Production defaults: petitioner first, petitioner last, mailing.
+    Case number is never a Go requirement, even if an older saved list has it.
+    Decedent residence is included only when the saved list has it, or when an
+    older ``fub_strict_property`` / FUB_STRICT_PROPERTY toggle is on and no list
+    has been saved yet.
+    """
+    if required_fields is not None:
+        return normalize_fub_go_required_fields(required_fields)
+    if settings is not None:
+        stored = settings.get("fub_go_required_fields", None)
+        if stored is not None:
+            return normalize_fub_go_required_fields(stored)
+        strict = bool(
+            settings.get("fub_strict_property")
+            if strict_property is None
+            else strict_property
+        )
+        fields = list(DEFAULT_FUB_GO_REQUIRED_FIELDS)
+        if strict and "decedent_residence" not in fields:
+            fields.append("decedent_residence")
+        return fields
+    if "FUB_GO_REQUIRED_FIELDS" in os.environ:
+        return normalize_fub_go_required_fields(os.environ.get("FUB_GO_REQUIRED_FIELDS"))
+    strict = (
+        _env_bool("FUB_STRICT_PROPERTY") if strict_property is None else bool(strict_property)
+    )
+    fields = list(DEFAULT_FUB_GO_REQUIRED_FIELDS)
+    if strict and "decedent_residence" not in fields:
+        fields.append("decedent_residence")
+    return fields
+
+
+def fub_go_required_from_settings(settings: dict | None = None) -> list[str]:
+    return resolve_fub_go_required_fields(settings=settings or {})
+
+
+def apply_fub_go_required_env(settings: dict | None = None) -> list[str]:
+    fields = fub_go_required_from_settings(settings)
+    os.environ["FUB_GO_REQUIRED_FIELDS"] = ",".join(fields)
+    os.environ["FUB_STRICT_PROPERTY"] = (
+        "1" if "decedent_residence" in fields else "0"
+    )
+    return fields
+
+
+def go_no_go_for_source(source_id: str, required_fields=None) -> dict:
     key = str(source_id or "placer")
     spec = SOURCE_GO_NO_GO.get(key) or {
         "required": [],
         "optional": [],
         "rules": ["Go/no-go is not defined for this source yet."],
     }
+    base_required = list(spec.get("required") or [])
+    base_optional = list(spec.get("optional") or [])
+    if key not in {"placer", "sacramento"}:
+        return {
+            "source_id": key,
+            "required": base_required,
+            "optional": base_optional,
+            "always": list(FUB_GO_ALWAYS_NOGO),
+            "rules": list(spec.get("rules") or []),
+        }
+    required_keys = set(resolve_fub_go_required_fields(required_fields))
+    combined: list[dict] = []
+    seen: set[str] = set()
+    for item in base_required + base_optional:
+        item_key = str(item.get("key") or "")
+        if not item_key or item_key in seen:
+            continue
+        seen.add(item_key)
+        combined.append(dict(item))
+    required: list[dict] = []
+    optional: list[dict] = []
+    for item in combined:
+        item_key = str(item.get("key") or "")
+        row = dict(item)
+        if item_key in FUB_GO_GATE_FIELD_KEYS:
+            row.pop("when", None)
+            if item_key in required_keys:
+                required.append(row)
+            else:
+                if item_key == "decedent_residence":
+                    row["when"] = (
+                        "Path A: optional unless checked on Follow Up Boss → Required for Go. "
+                        "Path B: required (with decedent name and petitioner phone)."
+                    )
+                else:
+                    row["when"] = (
+                        "Optional unless checked on Follow Up Boss → Required for Go"
+                    )
+                optional.append(row)
+            continue
+        if any(entry.get("key") == item_key for entry in base_required):
+            required.append(row)
+        else:
+            optional.append(row)
     return {
         "source_id": key,
-        "required": list(spec.get("required") or []),
-        "optional": list(spec.get("optional") or []),
+        "required": required,
+        "optional": optional,
+        "always": list(FUB_GO_ALWAYS_NOGO),
         "rules": list(spec.get("rules") or []),
     }
 
@@ -950,27 +1087,15 @@ DATA_SOURCES = [
         "status": "live",
         "description": "California Newspaper Public Notices plus Placer eCourt Public and DE-111 petitions.",
         "extracts": "CNPA notice, eCourt docket, petition PDF",
+        "lead_source": COUNTY_FUB_LEAD_SOURCES["placer"],
     },
     {
         "id": "sacramento",
         "name": "Sacramento County",
         "status": "live",
-        "description": (
-            "CNPA notices for NOTICE OF PETITION, kept when the ad is a petition "
-            "to administer an estate, plus the Sacramento Superior Court public "
-            "case summary (node/397)."
-        ),
-        "extracts": (
-            "CNPA notice and Journal Tech public summary "
-            "(parties, hearings, register titles). Petition PDFs are not downloaded."
-        ),
-    },
-    {
-        "id": "nevada",
-        "name": "Nevada County",
-        "status": "coming_soon",
-        "description": "Queued after Sacramento County.",
-        "extracts": "Not wired yet",
+        "description": "California Newspaper Public Notices (NOTICE OF PETITION) plus Sacramento Journal Technologies summaries and public DE-111/DE-147 PDFs after portal login.",
+        "extracts": "CNPA notice, Sacramento portal summary, public petition and duties PDFs",
+        "lead_source": COUNTY_FUB_LEAD_SOURCES["sacramento"],
     },
 ]
 
@@ -985,70 +1110,195 @@ SOURCE_SETTING_KEYS = [
     "max_search_pages",
 ]
 
+SACRAMENTO_LOOKBACK_KEY = "sacramento_lookback_days"
+SACRAMENTO_LOOKAHEAD_KEY = "sacramento_lookahead_days"
+SACRAMENTO_PAUSE_KEY = "sacramento_ecourt_pause_seconds"
+PUBLIC_REPORTS_LOOKBACK_KEY = "public_reports_lookback_days"
+DEFAULT_LOOKBACK_DAYS = 21
+DEFAULT_LOOKAHEAD_DAYS = 21
+DEFAULT_SACRAMENTO_LOOKBACK_DAYS = 60
+DEFAULT_SACRAMENTO_LOOKAHEAD_DAYS = 0
+# Node/415 only: 2 inclusive filing days ending today (today + yesterday) so
+# one missed daily HA run is recovered. One query per calendar day → 2 POSTs
+# per daily job. Raise in the panel for catch-up. Never inherit CNPA lookahead.
+DEFAULT_PUBLIC_REPORTS_LOOKBACK_DAYS = 2
+PUBLIC_REPORTS_LOOKAHEAD_DAYS = 0
+DEFAULT_PORTAL_PAUSE = 1.2
 
-_SACRAMENTO_PDF_ONLY = {
-    "mailing_address",
-    "mailing_city",
-    "mailing_state",
-    "mailing_zip",
-    "petitioner_email",
-    "petitioner_phone",
-    "decedent_residence",
-    "decedent_city",
-    "decedent_zip",
-    "decedent_died",
-    "death_place",
-    "estate_real",
-    "estate_personal",
-    "petition_pdf",
-    "de111_url",
-    "de147_url",
-}
 
-_SACRAMENTO_SOURCE = {
-    "case_number": "CNPA notice (YYPR######)",
-    "petitioner": "Public case parties, else CNPA notice",
-    "petitioner_first": "Public case parties, else CNPA notice",
-    "petitioner_last": "Public case parties, else CNPA notice",
-    "decedent": "CNPA notice / public case parties",
-    "decedent_first": "Split from decedent name",
-    "decedent_last": "Split from decedent name",
-    "hearing": "Public summary next event, else notice text",
-    "court_search": "Journal Tech public summary ?q=node/397/…",
-    "parties": "Logged-out Sacramento case summary",
-    "filed": "Public case header",
-    "caption": "Public case header",
-    "attorney": "CNPA notice or public party list",
-    "attorney_phone": "CNPA notice",
-    "newspaper": "CNPA",
-    "notice_url": "CNPA advert",
-    "will_offered": "CNPA notice",
-    "iaea_requested": "CNPA notice",
-    "case_type": "Public case header",
-    "court_status": "Public case summary",
-}
+def _optional_int(value, default: int) -> int:
+    if value is None or value == "":
+        return default
+    return int(value)
+
+
+def _optional_float(value, default: float) -> float:
+    if value is None or value == "":
+        return default
+    return float(value)
+
+
+def source_window_settings(settings: dict | None, source_id: str = "placer") -> dict:
+    """Lookback, lookahead, and portal pause for one county. Independent of the other.
+
+    Sacramento CNPA uses sacramento_lookback_days / sacramento_lookahead_days
+    (default 60/0). Node/415 uses public_reports_lookback_days (default 2:
+    today + yesterday) with lookahead always 0 — never CNPA's lookahead.
+    """
+    data = settings or {}
+    key = str(source_id or "placer").strip().lower()
+    if key == "sacramento":
+        lookback_raw = data.get(SACRAMENTO_LOOKBACK_KEY)
+        lookahead_raw = data.get(SACRAMENTO_LOOKAHEAD_KEY)
+        pause_raw = data.get(SACRAMENTO_PAUSE_KEY)
+        lookback_default = DEFAULT_SACRAMENTO_LOOKBACK_DAYS
+        lookahead_default = DEFAULT_SACRAMENTO_LOOKAHEAD_DAYS
+        pr_raw = data.get(PUBLIC_REPORTS_LOOKBACK_KEY)
+    else:
+        lookback_raw = data.get("lookback_days")
+        lookahead_raw = data.get("lookahead_days")
+        pause_raw = data.get("ecourt_pause_seconds")
+        lookback_default = DEFAULT_LOOKBACK_DAYS
+        lookahead_default = DEFAULT_LOOKAHEAD_DAYS
+        pr_raw = None
+    try:
+        lookback = _optional_int(lookback_raw, lookback_default)
+    except (TypeError, ValueError):
+        lookback = lookback_default
+    try:
+        lookahead = _optional_int(lookahead_raw, lookahead_default)
+    except (TypeError, ValueError):
+        lookahead = lookahead_default
+    try:
+        pause = _optional_float(pause_raw, DEFAULT_PORTAL_PAUSE)
+    except (TypeError, ValueError):
+        pause = DEFAULT_PORTAL_PAUSE
+    pr_lookback = DEFAULT_PUBLIC_REPORTS_LOOKBACK_DAYS
+    if key == "sacramento":
+        try:
+            pr_lookback = _optional_int(pr_raw, DEFAULT_PUBLIC_REPORTS_LOOKBACK_DAYS)
+        except (TypeError, ValueError):
+            pr_lookback = DEFAULT_PUBLIC_REPORTS_LOOKBACK_DAYS
+    return {
+        "lookback_days": lookback,
+        "lookahead_days": lookahead,
+        "public_reports_lookback_days": pr_lookback,
+        "public_reports_lookahead_days": PUBLIC_REPORTS_LOOKAHEAD_DAYS,
+        "ecourt_pause_seconds": pause,
+    }
+
+
+def apply_sacramento_source_settings(settings: dict, body: dict) -> dict:
+    """Copy Sacramento window fields from a sources POST onto HA options.
+
+    Accepts the panel's lookback_days / lookahead_days / ecourt_pause_seconds
+    / public_reports_lookback_days or the stored sacramento_* keys.
+    Does not change Placer's window. 415 lookahead is never stored (always 0).
+    """
+    out = dict(settings or {})
+    payload = body or {}
+    if "sacramento_lookback_days" in payload or "lookback_days" in payload:
+        raw = (
+            payload["sacramento_lookback_days"]
+            if "sacramento_lookback_days" in payload
+            else payload["lookback_days"]
+        )
+        value = _optional_int(raw, DEFAULT_SACRAMENTO_LOOKBACK_DAYS)
+        if value < 1 or value > 365:
+            raise ValueError("lookback_days")
+        out[SACRAMENTO_LOOKBACK_KEY] = value
+    if "sacramento_lookahead_days" in payload or "lookahead_days" in payload:
+        raw = (
+            payload["sacramento_lookahead_days"]
+            if "sacramento_lookahead_days" in payload
+            else payload["lookahead_days"]
+        )
+        value = _optional_int(raw, DEFAULT_SACRAMENTO_LOOKAHEAD_DAYS)
+        if value < 0 or value > 120:
+            raise ValueError("lookahead_days")
+        out[SACRAMENTO_LOOKAHEAD_KEY] = value
+    if PUBLIC_REPORTS_LOOKBACK_KEY in payload:
+        value = _optional_int(
+            payload[PUBLIC_REPORTS_LOOKBACK_KEY],
+            DEFAULT_PUBLIC_REPORTS_LOOKBACK_DAYS,
+        )
+        if value < 1 or value > 365:
+            raise ValueError("public_reports_lookback_days")
+        out[PUBLIC_REPORTS_LOOKBACK_KEY] = value
+    if "sacramento_ecourt_pause_seconds" in payload or "ecourt_pause_seconds" in payload:
+        raw = (
+            payload["sacramento_ecourt_pause_seconds"]
+            if "sacramento_ecourt_pause_seconds" in payload
+            else payload["ecourt_pause_seconds"]
+        )
+        value = _optional_float(raw, DEFAULT_PORTAL_PAUSE)
+        if value < 0.5 or value > 10:
+            raise ValueError("ecourt_pause_seconds")
+        out[SACRAMENTO_PAUSE_KEY] = value
+    return out
+
+
+def sacramento_cli_window_args(settings: dict | None) -> list[str]:
+    """Argv for sacramento_probate_monitor: CNPA window plus independent 415 lookback."""
+    window = source_window_settings(settings, "sacramento")
+    return [
+        "--lookback-days",
+        str(int(window["lookback_days"])),
+        "--lookahead-days",
+        str(int(window["lookahead_days"])),
+        "--public-reports-lookback-days",
+        str(int(window["public_reports_lookback_days"])),
+    ]
 
 
 def source_field_catalog(source_id: str) -> list[dict]:
     key = str(source_id or "placer")
     if key == "placer":
         return PROBATE_SOURCE_FIELDS
-    if key != "sacramento":
+    if key == "sacramento":
         rows = []
         for item in PROBATE_SOURCE_FIELDS:
             row = dict(item)
-            row["unavailable"] = True
-            row["source"] = "Not extracted yet"
+            if row.get("key") in {"court_search", "court_url"}:
+                row["label"] = "Sacramento case summary URL"
+                row["source"] = "Journal Technologies public portal node/397"
+            elif row.get("key") == "case_number":
+                row["source"] = "CNPA notice / Sacramento portal"
+                row["notes"] = "YYPR###### case number used as the lead key."
+            elif row.get("key") in {
+                "mailing_address",
+                "petitioner_email",
+                "petitioner_phone",
+                "decedent_residence",
+                "decedent_died",
+                "death_place",
+                "estate_real",
+                "estate_personal",
+                "petition_pdf",
+                "de111_url",
+                "de147_url",
+                "de150_url",
+            }:
+                row["source"] = "Sacramento public DE-111 / DE-147 after portal login"
+            else:
+                src = str(row.get("source") or "CNPA notice / Sacramento portal")
+                src = (
+                    src.replace("eCourt petitioner", "Sacramento portal petitioner")
+                    .replace("eCourt parties", "Sacramento portal parties")
+                    .replace("eCourt next event", "Sacramento portal next event")
+                    .replace("eCourt search / docket", "Sacramento portal docket")
+                    .replace("eCourt summary", "Sacramento portal summary")
+                    .replace("eCourt", "Journal Technologies public portal")
+                    .replace("node/45", "node/397")
+                )
+                row["source"] = src
             rows.append(row)
         return rows
     rows = []
     for item in PROBATE_SOURCE_FIELDS:
         row = dict(item)
-        if row["key"] in _SACRAMENTO_PDF_ONLY:
-            row["unavailable"] = True
-            row["source"] = "Petition PDF (not downloaded; no portal password is stored)"
-        elif row["key"] in _SACRAMENTO_SOURCE:
-            row["source"] = _SACRAMENTO_SOURCE[row["key"]]
+        row["unavailable"] = True
+        row["source"] = "Not extracted yet"
         rows.append(row)
     return rows
 
@@ -1062,34 +1312,93 @@ def custom_fields_for_source(mapping: dict, source_id: str) -> dict:
         return fields
     if source_id == "placer":
         return mapping.get("custom_fields") or {}
+    if source_id == "sacramento":
+        return mapping.get("custom_fields") or {}
     return {}
 
 
-def active_source_id(settings: dict | None = None) -> str:
-    county = str((settings or {}).get("county") or "Placer")
-    key = _datasources().county_key(county)
-    if key == "sacramento":
-        return "sacramento"
-    return "placer"
+def mapping_for_export(mapping: dict, source_id: str | None = None) -> dict:
+    source_id = str(
+        source_id or os.environ.get("FUB_DATA_SOURCE") or "placer"
+    ).strip().lower() or "placer"
+    out = dict(mapping or {})
+    fields = custom_fields_for_source(out, source_id)
+    if fields:
+        out["custom_fields"] = fields
+    try:
+        out["lead_source"] = fub_lead_source(source_id)
+    except ValueError:
+        out["lead_source"] = ""
+    return out
+
+
+def normalize_source_enabled(settings: dict | None = None) -> dict[str, bool]:
+    raw = (settings or {}).get("source_enabled") or {}
+    if not isinstance(raw, dict):
+        raw = {}
+    flags = {"placer": True, "sacramento": False}
+    for key in flags:
+        if key in raw:
+            flags[key] = bool(raw[key])
+    return flags
+
+
+def source_is_enabled(settings: dict | None, source_id: str) -> bool:
+    key = str(source_id or "").strip().lower()
+    return bool(normalize_source_enabled(settings).get(key))
+
+
+def enabled_live_sources(settings: dict | None = None) -> list[str]:
+    flags = normalize_source_enabled(settings)
+    return [
+        item["id"]
+        for item in DATA_SOURCES
+        if item.get("status") == "live" and flags.get(item["id"])
+    ]
 
 
 def sources_payload(settings: dict | None = None) -> dict:
-    block = {}
+    placer = {}
     for key in SOURCE_SETTING_KEYS:
-        block[key] = (settings or {}).get(key)
-    county = str(block.get("county") or "Placer")
-    block["county"] = _datasources().normalize_county_name(county)
-    block["keywords"] = _datasources().keywords_for_county(county, block.get("keywords"))
-    active = active_source_id({"county": block["county"]})
+        placer[key] = (settings or {}).get(key)
+    if not placer.get("county"):
+        placer["county"] = "Placer"
+    enabled = normalize_source_enabled(settings)
+    sac_window = source_window_settings(settings, "sacramento")
+    sources = []
+    for item in DATA_SOURCES:
+        row = dict(item)
+        row["enabled"] = bool(enabled.get(row["id"])) if row.get("status") == "live" else False
+        sources.append(row)
     return {
-        "sources": DATA_SOURCES,
-        "active": active,
-        "placer": block,
-        "settings": block,
-        "fields": source_field_catalog(active),
+        "sources": sources,
+        "source_enabled": enabled,
+        "active": "placer",
+        "placer": placer,
+        "sacramento": {
+            "county": "Sacramento",
+            "keywords": '"NOTICE OF PETITION"',
+            "lookback_days": sac_window["lookback_days"],
+            "lookahead_days": sac_window["lookahead_days"],
+            "public_reports_lookback_days": sac_window["public_reports_lookback_days"],
+            "skip_portal": placer.get("skip_portal"),
+            "generate_pdf": placer.get("generate_pdf"),
+            "ecourt_pause_seconds": sac_window["ecourt_pause_seconds"],
+            "max_search_pages": placer.get("max_search_pages"),
+            "sacramento_portal_user": str((settings or {}).get("sacramento_portal_user") or ""),
+            "sacramento_portal_password_set": bool(
+                str((settings or {}).get("sacramento_portal_password") or "").strip()
+            ),
+        },
+        "fields": source_field_catalog("placer"),
         "source_fields": {item["id"]: source_field_catalog(item["id"]) for item in DATA_SOURCES},
+        "fub_go_required_fields": fub_go_required_from_settings(settings),
+        "fub_go_gate_fields": list(FUB_GO_GATE_FIELDS),
         "source_go_no_go": {
-            item["id"]: go_no_go_for_source(item["id"]) for item in DATA_SOURCES
+            item["id"]: go_no_go_for_source(
+                item["id"], fub_go_required_from_settings(settings)
+            )
+            for item in DATA_SOURCES
         },
     }
 
@@ -1105,6 +1414,8 @@ def mapping_catalog() -> dict:
         "source_go_no_go": {
             item["id"]: go_no_go_for_source(item["id"]) for item in DATA_SOURCES
         },
+        "fub_go_gate_fields": list(FUB_GO_GATE_FIELDS),
+        "fub_go_required_fields": resolve_fub_go_required_fields(),
         "default_custom_fields": {
             "petitioner_first": "firstName",
             "petitioner_last": "lastName",
@@ -1229,6 +1540,27 @@ def _stringify_field(value) -> str:
     return str(value).strip()
 
 
+def _gmv_plain_field(value) -> str:
+    """Plain GMV for review sheets. Empty if missing; '0' if $0."""
+    if value is None or value is True or value is False:
+        return ""
+    if isinstance(value, (int, float)):
+        if value == int(value):
+            return str(int(value))
+        return str(value)
+    raw = str(value).strip()
+    if not raw:
+        return ""
+    cleaned = raw.replace("$", "").replace(",", "").strip()
+    try:
+        amount = float(cleaned)
+        if amount == int(amount):
+            return str(int(amount))
+        return f"{amount:.2f}".rstrip("0").rstrip(".")
+    except ValueError:
+        return raw
+
+
 def _money_field(value) -> str:
     raw = _stringify_field(value)
     if not raw:
@@ -1257,7 +1589,13 @@ def source_extract_rows(row: dict, mapping: dict) -> list[dict]:
     values = probate_export_values(row, mapping)
     seen: set[str] = set()
     out: list[dict] = []
-    for field in PROBATE_SOURCE_FIELDS:
+    source_id = _row_source_id(row)
+    extra_source = (
+        "Journal Technologies public portal"
+        if source_id == "sacramento"
+        else "eCourt"
+    )
+    for field in source_field_catalog(source_id):
         key = str(field.get("key") or "")
         if not key:
             continue
@@ -1302,7 +1640,7 @@ def source_extract_rows(row: dict, mapping: dict) -> list[dict]:
             {
                 "key": key,
                 "label": label,
-                "source": "eCourt",
+                "source": extra_source,
                 "value": value,
                 "empty": False,
                 "unavailable": False,
@@ -1372,7 +1710,12 @@ def mapped_look_payload(row: dict, person: dict, settings: dict, mapping: dict) 
     return {
         "person": person_rows,
         "event_type": event.get("type") or settings.get("event_type") or "",
-        "lead_source": event.get("source") or settings.get("source") or "",
+        "lead_source": (
+            mapping.get("lead_source")
+            or event.get("source")
+            or _fub_lead_source_name(row)
+            or ""
+        ),
         "system": event.get("system") or "",
         "message": event.get("message") or "",
         "description": event.get("description") or "",
@@ -1382,11 +1725,7 @@ def mapped_look_payload(row: dict, person: dict, settings: dict, mapping: dict) 
 def probate_export_values(row: dict, mapping: dict) -> dict:
     petitioner = portal_petitioner(row)
     first, last = split_person_name(petitioner)
-    decedent = (
-        str(row.get("decedent") or "").strip()
-        or portal_party_name(row, "decedent")
-        or str(row.get("decedent_name") or "").strip()
-    )
+    decedent = _row_decedent_name(row)
     dec_first, dec_last = split_person_name(decedent.split(",")[0] if decedent else "")
     case = case_key(row)
     court_note = _court_search_note(row, mapping)
@@ -1401,7 +1740,7 @@ def probate_export_values(row: dict, mapping: dict) -> dict:
         "decedent": decedent,
         "decedent_first": dec_first,
         "decedent_last": dec_last,
-        "case_number": case,
+        "case_number": court_case_number(row) or "",
         "decedent_residence": _stringify_field(row.get("decedent_residence")),
         "decedent_city": _stringify_field(row.get("decedent_city")),
         "decedent_state": _stringify_field(row.get("decedent_state")),
@@ -1423,6 +1762,7 @@ def probate_export_values(row: dict, mapping: dict) -> dict:
         "petition_pdf": petition_name,
         "de111_url": petition_public_uri(case) if case and _petition_pdf_path(row) else "",
         "de147_url": duties_public_uri(case) if case and _duties_pdf_path(row) else "",
+        "de150_url": letters_public_uri(case) if case and _letters_pdf_path(row) else "",
         "filed": _stringify_field(row.get("filed") or row.get("filed_from_docket")),
         "caption": _stringify_field(row.get("caption")),
         "attorney": _stringify_field(row.get("attorney")),
@@ -1535,6 +1875,9 @@ def combined_notes(row: dict, mapping: dict) -> str:
     portal = case_portal_url(row)
     if portal and not any(portal in part for part in parts):
         parts.append(f"Court: {portal}")
+    letters = values.get("de150_url") or ""
+    if letters and not any(letters in part for part in parts):
+        parts.append(f"Letters: {letters}")
     return "\n".join(parts)
 
 
@@ -1849,12 +2192,19 @@ def _fetch_person_notes(person_id) -> str:
         return ""
 
 
-def mapping_payload(path: Path | None = None, *, fetch_fub: bool = True, source_id: str = "placer") -> dict:
+def mapping_payload(
+    path: Path | None = None,
+    *,
+    fetch_fub: bool = True,
+    source_id: str = "placer",
+    settings: dict | None = None,
+) -> dict:
     mapping = load_mapping(path)
     live = list_fub_custom_fields() if fetch_fub else {"fields": [], "error": None}
     written = resolve_mapping_path(path)
     source_id = str(source_id or "placer")
     source_fields = {item["id"]: source_field_catalog(item["id"]) for item in DATA_SOURCES}
+    required = fub_go_required_from_settings(settings) if settings is not None else resolve_fub_go_required_fields()
     return {
         "mapping": mapping,
         "path": str(written),
@@ -1863,8 +2213,10 @@ def mapping_payload(path: Path | None = None, *, fetch_fub: bool = True, source_
         "data_sources": DATA_SOURCES,
         "source_id": source_id,
         "source_fields": source_fields,
+        "fub_go_required_fields": required,
+        "fub_go_gate_fields": list(FUB_GO_GATE_FIELDS),
         "source_go_no_go": {
-            item["id"]: go_no_go_for_source(item["id"]) for item in DATA_SOURCES
+            item["id"]: go_no_go_for_source(item["id"], required) for item in DATA_SOURCES
         },
         "source_custom_fields": custom_fields_for_source(mapping, source_id),
         "fub_custom_fields": live.get("fields") or [],
@@ -1876,22 +2228,46 @@ def mapping_payload(path: Path | None = None, *, fetch_fub: bool = True, source_
 def split_person_name(name: str) -> tuple[str, str]:
     text = re.sub(r"\s+", " ", (name or "").strip())
     text = text.replace('"', "").replace("'", "")
-    if not text:
+    text = _strip_ocr_name_junk(text)
+    if not text or _is_caption_person_name(text):
         return "", ""
     if "," in text:
         last, _, rest = text.partition(",")
         first = rest.strip()
         if first and last.strip():
-            return first.title(), last.strip().title()
+            first_out = _strip_ocr_name_junk(first.title())
+            last_out = _strip_ocr_name_junk(last.strip().title())
+            if _is_caption_name_part(first_out) or _is_caption_name_part(last_out):
+                return "", ""
+            return first_out, last_out
     parts = [part for part in text.split(" ") if part]
+    while len(parts) >= 2 and re.fullmatch(
+        r"\d+|\(\s*\d+\s*\)?", parts[-1].rstrip(".,[]")
+    ):
+        parts.pop()
+    if parts:
+        parts[-1] = re.sub(r"(?<=[A-Za-z.'-])\d{1,2}$", "", parts[-1])
+        if not parts[-1]:
+            parts.pop()
+    suffixes = {"jr", "jr.", "sr", "sr.", "ii", "iii", "iv", "esq", "esq."}
+    while parts and parts[0].rstrip(".").lower() in suffixes:
+        parts.pop(0)
     if not parts:
         return "", ""
-    suffixes = {"jr", "jr.", "sr", "sr.", "ii", "iii", "iv", "esq", "esq."}
+    blocked_last = {"case", "number", "dept", "department", "casenumber"}
     if len(parts) == 1:
-        return parts[0].title(), ""
-    if len(parts) >= 3 and parts[-1].rstrip(".").lower() in suffixes:
-        return " ".join(parts[:-2]).title(), " ".join(parts[-2:]).title()
-    return " ".join(parts[:-1]).title(), parts[-1].title()
+        first, last = parts[0].title(), ""
+    elif len(parts) >= 3 and parts[-1].rstrip(".").lower() in suffixes:
+        first, last = " ".join(parts[:-2]).title(), " ".join(parts[-2:]).title()
+    else:
+        first, last = " ".join(parts[:-1]).title(), parts[-1].title()
+    first = _strip_ocr_name_junk(first)
+    last = _strip_ocr_name_junk(last)
+    if last.rstrip(".").lower() in blocked_last:
+        last = ""
+    if _is_caption_name_part(first) or _is_caption_name_part(last):
+        return "", ""
+    return first, last
 
 
 def portal_party_name(row: dict, role: str) -> str:
@@ -1911,10 +2287,27 @@ def portal_party_name(row: dict, role: str) -> str:
 
 def portal_petitioner(row: dict) -> str:
     for role in ("petitioner", "administrator", "personal representative"):
-        name = portal_party_name(row, role)
+        name = _usable_person_name(portal_party_name(row, role))
         if name:
             return name
-    return str(row.get("petitioner") or row.get("petitioner_name") or "").strip()
+    for key in ("item2b_name", "attorney_for_name", "petitioner", "petitioner_name"):
+        raw = str(row.get(key) or "")
+        if key == "attorney_for_name" and _is_court_or_firm_caption_name(raw):
+            continue
+        name = _usable_person_name(raw)
+        if name:
+            return name
+    return ""
+
+
+def _usable_person_name(raw: str) -> str:
+    name = _clean_person_name(raw)
+    if not name or _is_court_or_firm_caption_name(name) or _is_caption_person_name(name):
+        return ""
+    first, last = split_person_name(name)
+    if not first and not last:
+        return ""
+    return name
 
 
 def _strip_county_noise(text: str) -> str:
@@ -1924,10 +2317,12 @@ def _strip_county_noise(text: str) -> str:
 
 
 def _usable_city(city: str) -> str:
-    low = re.sub(r"\s+", " ", (city or "").strip().lower())
-    if not low or low in NOT_CITIES or low.endswith(" county"):
-        return ""
-    return (city or "").strip()
+    try:
+        from .petition_parse import _usable_city as parse_city
+    except ImportError:
+        from petition_parse import _usable_city as parse_city
+
+    return parse_city(city)
 
 
 def split_address(line: str) -> dict | None:
@@ -1973,7 +2368,7 @@ def _fub_address(
     zip_code = str(parsed.get("code") or code or "").strip()
     if city and street.lower().endswith(city.lower()):
         street = street[: -len(city)].strip(" ,")
-    if not street:
+    if not street or _is_junk_mailing_street(street):
         return None
     addr = {
         "street": street,
@@ -2057,220 +2452,263 @@ def case_key(row: dict) -> str:
     return str(row.get("case_number") or row.get("advert_id") or "").strip()
 
 
+PLACEHOLDER_CASE_RE = re.compile(r"(?i)^notices_\d+$")
+
+
+def is_placeholder_case_id(value: str | None) -> bool:
+    """True when there is no court case number (blank or Notices_* style)."""
+    text = str(value or "").strip()
+    if not text:
+        return True
+    return bool(PLACEHOLDER_CASE_RE.match(text))
+
+
+def court_case_number(row: dict) -> str:
+    raw = str((row or {}).get("case_number") or "").strip()
+    if not raw or is_placeholder_case_id(raw):
+        return ""
+    return raw
+
+
+def _row_decedent_name(row: dict) -> str:
+    for raw in (
+        str(row.get("decedent") or "").strip(),
+        portal_party_name(row, "decedent"),
+        str(row.get("decedent_name") or "").strip(),
+    ):
+        name = _stored_person_name(raw)
+        if not name:
+            continue
+        first, last = split_person_name(name)
+        if first or last:
+            return name
+    return ""
+
+
+def _row_decedent_address(row: dict) -> str:
+    return str(
+        row.get("decedent_residence") or row.get("decedent_address") or ""
+    ).strip()
+
+
+def _row_mailing_address(row: dict) -> str:
+    line = str(
+        _row_contact(row).get("mailing_address")
+        or row.get("mailing_address")
+        or row.get("petitioner_address")
+        or ""
+    ).strip()
+    if not line or _is_junk_mailing_street(line):
+        return ""
+    return line
+
+
+def _row_petitioner_phone(row: dict) -> str:
+    return str(
+        _row_contact(row).get("petitioner_phone")
+        or row.get("petitioner_phone")
+        or ""
+    ).strip()
+
+
+def _petitioner_name_parts(row: dict) -> tuple[str, str, str]:
+    petitioner = portal_petitioner(row)
+    first, last = split_person_name(petitioner)
+    if not first:
+        extra_first, extra_last = split_person_name(str(row.get("petitioner_first") or ""))
+        first = extra_first
+        if extra_last and not last:
+            last = extra_last
+    if not last:
+        extra_first, extra_last = split_person_name(str(row.get("petitioner_last") or ""))
+        last = extra_last
+        if extra_first and not first:
+            first = extra_first
+    if _is_caption_name_part(first) or _is_caption_name_part(last):
+        return "", "", ""
+    return petitioner, first, last
+
+
+def _estate_real_amount(row: dict) -> float | None:
+    try:
+        from .petition_parse import parse_money_amount
+    except ImportError:
+        from petition_parse import parse_money_amount
+
+    amount = parse_money_amount((row or {}).get("estate_real"))
+    if _is_placeholder_estate_real(amount):
+        return None
+    return amount
+
+
+def _path_b_eligible(row: dict) -> bool:
+    return not court_case_number(row)
+
+
+def _path_a_reason(row: dict, required: set[str], existing_id: int | None) -> str | None:
+    _petitioner, first, last = _petitioner_name_parts(row)
+    if "petitioner_first" in required or "petitioner_last" in required:
+        missing_first = "petitioner_first" in required and not first
+        missing_last = "petitioner_last" in required and not last
+        if missing_first or missing_last:
+            return "petitioner_name_incomplete"
+    source = str(
+        row.get("source_id") or os.environ.get("FUB_DATA_SOURCE") or "placer"
+    ).strip().lower()
+    if (
+        "mailing_address" in required
+        and source in {"placer", "sacramento"}
+        and not _row_mailing_address(row)
+    ):
+        return "missing_petitioner_address"
+    if (
+        "decedent_residence" in required
+        and existing_id is None
+        and not _row_decedent_address(row)
+    ):
+        return "missing_decedent_residence"
+    return None
+
+
+def _path_b_reason(row: dict) -> str | None:
+    petitioner, first, last = _petitioner_name_parts(row)
+    if not ((first and last) or petitioner):
+        return "petitioner_name_incomplete"
+    if not _row_decedent_name(row):
+        return "missing_decedent"
+    if not _row_decedent_address(row):
+        return "missing_decedent_residence"
+    if not _row_petitioner_phone(row):
+        return "missing_petitioner_phone"
+    return None
+
+
 def petition_safe_case(case: str) -> str:
     return re.sub(r"[^\w\-]+", "_", str(case or "").strip()) or "case"
 
 
-def petition_file_token(case: str, secret: str | None = None, *, kind: str = "de111") -> str:
+def petition_file_token(
+    case: str,
+    secret: str | None = None,
+    *,
+    kind: str = "de111",
+    exp: int | None = None,
+) -> str:
     raw = (secret or os.environ.get("FUB_PETITION_TOKEN_SECRET") or "placer-probate")
+    payload = f"{kind}:{petition_safe_case(case)}"
+    if exp is not None:
+        payload = f"{payload}:{int(exp)}"
     return hmac.new(
         str(raw).encode(),
-        f"{kind}:{petition_safe_case(case)}".encode(),
+        payload.encode(),
         hashlib.sha256,
     ).hexdigest()[:32]
 
 
-def petition_public_uri(case: str, nabu_base: str | None = None) -> str:
-    return form_public_uri(case, "de111", nabu_base)
+LISTINGS_SHARE_CASE = "public"
+LISTINGS_SHARE_KIND = "listings"
+LISTINGS_SHARE_PATH = "/api/placer_probate_monitor/listings/public"
 
 
-def duties_public_uri(case: str, nabu_base: str | None = None) -> str:
-    return form_public_uri(case, "de147", nabu_base)
+def listings_share_token(secret: str | None = None, *, exp: int | None = None) -> str:
+    return petition_file_token(
+        LISTINGS_SHARE_CASE, secret=secret, kind=LISTINGS_SHARE_KIND, exp=exp
+    )
 
 
-def _document_base():
-    try:
-        from . import document_base as module
-    except ImportError:
-        import document_base as module
+def listings_share_status(
+    token: str | None,
+    secret: str | None = None,
+    *,
+    exp: str | int | None = None,
+    now: int | None = None,
+) -> str | None:
+    """Return None when the HMAC is valid; otherwise missing, invalid, or expired."""
+    import time
 
-    return module
+    given = str(token or "").strip()
+    if not given:
+        return "missing"
+    exp_value = None
+    if exp not in (None, ""):
+        try:
+            exp_value = int(exp)
+        except (TypeError, ValueError):
+            return "invalid"
+    expected = listings_share_token(secret, exp=exp_value)
+    if len(given) != len(expected) or not hmac.compare_digest(given, expected):
+        return "invalid"
+    if exp_value is not None:
+        clock = int(now if now is not None else time.time())
+        if exp_value < clock:
+            return "expired"
+    return None
 
 
-def configured_form_base(kind: str, nabu_base: str | None = None) -> str:
-    """DE-111 / DE-147 base. A Nabu Casa origin replaces a LAN base."""
+def listings_share_http_error(status: str) -> tuple[dict, int]:
+    if status == "missing":
+        return {"error": "unauthorized", "message": "Missing share token."}, 401
+    if status == "expired":
+        return {"error": "expired", "message": "Share link expired."}, 403
+    return {"error": "forbidden", "message": "Invalid share token."}, 403
+
+
+def listings_share_payload(base: str, secret: str | None = None) -> dict:
+    token = listings_share_token(secret)
+    query = f"token={token}"
+    root = str(base or "").rstrip("/")
+    return {
+        "share_path": LISTINGS_SHARE_PATH,
+        "share_token": token,
+        "share_url": f"{root}{LISTINGS_SHARE_PATH}?{query}" if root else "",
+    }
+
+
+def form_api_uri(case: str, kind: str = "de111") -> str:
+    """Relative Home Assistant API path for a stored petition PDF."""
+    slug = str(kind or "de111").strip().lower() or "de111"
+    if slug not in {"de111", "de147", "de150"}:
+        slug = "de111"
+    safe = petition_safe_case(case)
+    if not safe or safe == "case":
+        return ""
+    return f"/api/placer_probate_monitor/{slug}/{petition_file_token(case, kind=slug)}/{safe}.pdf"
+
+
+def petition_public_uri(case: str) -> str:
+    return form_public_uri(case, "de111")
+
+
+def duties_public_uri(case: str) -> str:
+    return form_public_uri(case, "de147")
+
+
+def letters_public_uri(case: str) -> str:
+    return form_public_uri(case, "de150")
+
+
+def form_public_uri(case: str, kind: str) -> str:
     if kind == "de147":
-        configured = str(os.environ.get("FUB_DUTIES_BASE_URL") or "").strip()
+        base = str(os.environ.get("FUB_DUTIES_BASE_URL") or "").rstrip("/")
+    elif kind == "de150":
+        base = str(os.environ.get("FUB_LETTERS_BASE_URL") or "").rstrip("/")
     else:
-        configured = str(os.environ.get("FUB_PETITION_BASE_URL") or "").strip()
-    nabu = str(nabu_base or os.environ.get("FUB_NABU_CASA_URL") or "").strip()
-    return _document_base().choose_document_base(nabu, configured)
-
-
-def form_public_uri(case: str, kind: str, nabu_base: str | None = None) -> str:
-    base = configured_form_base(kind, nabu_base).rstrip("/")
+        base = str(os.environ.get("FUB_PETITION_BASE_URL") or "").rstrip("/")
     if not base:
         return ""
     safe = petition_safe_case(case)
     return f"{base}/{petition_file_token(case, kind=kind)}/{safe}.pdf"
 
 
-def _publicize_document_url(url: str, nabu_base: str | None = None) -> str:
-    text = str(url or "").strip()
-    if not text:
-        return ""
-    module = _document_base()
-    nabu = str(nabu_base or os.environ.get("FUB_NABU_CASA_URL") or "").strip()
-    configured = str(os.environ.get("FUB_PETITION_BASE_URL") or "").strip()
-    target = module.choose_document_base(nabu, configured)
-    if module.is_nabu_casa_ui_url(target):
-        return module.public_document_url(text, target)
-    return text
-
-
-def listing_document_links(row: dict, nabu_base: str | None = None) -> list[dict]:
-    """Public DE-111 / DE-147 links for one probate listing.
-
-    Links that already point at a LAN Home Assistant address are rewritten to
-    the Nabu Casa origin when one is configured. Court-portal download URLs
-    are left alone.
-    """
-    case = case_key(row)
-    links: list[dict] = []
-    seen: set[str] = set()
-
-    def add(label: str, url: str) -> None:
-        raw = str(url or "").strip()
-        if "/api/placer_probate_monitor/" not in raw:
-            return
-        public = _publicize_document_url(raw, nabu_base)
-        if not public:
-            return
-        marker = "/api/placer_probate_monitor/"
-        idx = public.find(marker)
-        key = public[idx:] if idx >= 0 else public
-        if key in seen:
-            return
-        seen.add(key)
-        links.append({"label": label or "Document", "url": public})
-
-    for key, label in (("de111_url", "DE-111"), ("de147_url", "DE-147")):
-        add(label, str(row.get(key) or ""))
-    for doc in row.get("documents") or []:
-        if isinstance(doc, str):
-            add("Document", doc)
-        elif isinstance(doc, dict):
-            add(
-                str(doc.get("label") or doc.get("name") or "Document"),
-                str(doc.get("url") or doc.get("href") or ""),
-            )
-    for doc in row.get("document_files") or []:
-        if not isinstance(doc, dict):
-            continue
-        add(
-            str(doc.get("name") or doc.get("label") or "Document"),
-            str(doc.get("url") or ""),
-        )
-    if case:
-        if not any(item["label"] == "DE-111" for item in links) and _petition_pdf_path(row):
-            add("DE-111", form_public_uri(case, "de111", nabu_base))
-        if not any(item["label"] == "DE-147" for item in links) and _duties_pdf_path(row):
-            add("DE-147", form_public_uri(case, "de147", nabu_base))
-    return links
-
-
-def _absolute_document_href(url: str, nabu: str) -> str:
-    """Absolute Nabu Casa document URL, or ``""`` when that host is unknown.
-
-    A private IP, localhost, relative ``/api`` path, or ``host:8123`` is never
-    returned. Court URLs that are already public stay unchanged.
-    """
-    module = _document_base()
-    text = str(url or "").strip()
-    if not text:
-        return ""
-    if module.is_nabu_casa_ui_url(nabu):
-        rewritten = module.public_document_url(text, nabu)
-        if module.is_nabu_casa_ui_url(rewritten):
-            return rewritten
-        path = module.document_api_path(text) or module.document_api_path(rewritten)
-        origin = module.nabu_casa_origin(nabu)
-        if origin and path.startswith("/"):
-            return f"{origin}{path}"
-        if rewritten and not module.should_rewrite_document_url(rewritten):
-            return rewritten
-        return ""
-    if module.should_rewrite_document_url(text):
-        return ""
-    return text
-
-
-def _is_private_document_href(url: str) -> bool:
-    module = _document_base()
-    text = str(url or "").strip()
-    if not text or text.startswith("/api/"):
-        return False
-    if "/api/placer_probate_monitor/" not in text and "://" not in text and ":8123" not in text:
-        return False
-    return module.should_rewrite_document_url(text)
-
-
-def _purge_private_hrefs(value, key: str = ""):
-    """Drop private document hrefs. ``path`` keeps the API path only."""
-    if key == "path":
-        return value
-    if isinstance(value, str):
-        return "" if _is_private_document_href(value) else value
-    if isinstance(value, list):
-        return [_purge_private_hrefs(item) for item in value]
-    if isinstance(value, dict):
-        return {name: _purge_private_hrefs(item, name) for name, item in value.items()}
-    return value
-
-
-def publicize_listing_row(row: dict, nabu_base: str | None = None) -> dict:
-    """Listing row whose Documents hrefs are absolute Nabu Casa URLs.
-
-    ``de111_url``, ``de147_url``, and ``documents`` are what the listings
-    panel prints in the Documents column. A stored LAN address on any of
-    them is rewritten when a Nabu Casa host is known. When it is not, the
-    private IP is removed instead of being returned as the href. ``path``
-    keeps ``/api/placer_probate_monitor/...`` so the panel can still build
-    an absolute remote URL from Home Assistant Cloud.
-    """
-    item = dict(row or {})
-    module = _document_base()
-    nabu = str(nabu_base or os.environ.get("FUB_NABU_CASA_URL") or "").strip()
-    if not module.is_nabu_casa_ui_url(nabu):
-        nabu = ""
-    documents = listing_document_links(item, nabu or None)
-    if documents:
-        item["documents"] = documents
-
-    def stash(raw: str) -> tuple[str, str]:
-        text = str(raw or "").strip()
-        return _absolute_document_href(text, nabu), module.document_api_path(text)
-
-    for key in ("de111_url", "de147_url"):
-        url, path = stash(str(item.get(key) or ""))
-        if url or path or item.get(key):
-            item[key] = url
-        if path:
-            item[key.replace("_url", "_path")] = path
-    rewritten: list[dict] = []
-    for doc in item.get("documents") or []:
-        if isinstance(doc, str):
-            raw = doc
-            label = "Document"
-            clone = {"label": label}
-        elif isinstance(doc, dict):
-            raw = str(doc.get("url") or doc.get("href") or "")
-            clone = dict(doc)
-            label = str(clone.get("label") or clone.get("name") or "Document")
-            clone["label"] = label
-        else:
-            continue
-        url, path = stash(raw)
-        if not url and not path:
-            continue
-        clone["url"] = url
-        if path:
-            clone["path"] = path
-        clone.pop("href", None)
-        rewritten.append(clone)
-    if rewritten:
-        item["documents"] = rewritten
-    return _purge_private_hrefs(item)
+def _petition_docs_search_dirs(row: dict | None = None) -> list[Path]:
+    source = _row_source_id(row)
+    primary = petition_docs_dir(source)
+    other = petition_docs_dir("placer" if source == "sacramento" else "sacramento")
+    seen: list[Path] = []
+    for docs in (primary, other):
+        if docs not in seen:
+            seen.append(docs)
+    return seen
 
 
 def _petition_pdf_path(row: dict) -> Path | None:
@@ -2280,20 +2718,29 @@ def _petition_pdf_path(row: dict) -> Path | None:
         if path.is_file() and path.stat().st_size > 4:
             return path
     case = petition_safe_case(case_key(row))
-    docs = Path(os.environ.get("FUB_PETITION_DOCS_DIR") or "")
-    if not docs.is_dir() or not case:
+    if not case:
         return None
-    folder = docs / case
-    named = folder / f"{case}_DE-111.pdf"
-    if named.is_file():
-        return named
-    if folder.is_dir():
-        for path in sorted(folder.glob("*_petition.pdf")):
-            if path.is_file():
-                return path
-        for path in sorted(folder.glob("*.pdf")):
-            if path.is_file() and "_DE-147" not in path.name.upper():
-                return path
+    for docs in _petition_docs_search_dirs(row):
+        if not docs.is_dir():
+            continue
+        folder = docs / case
+        named = folder / f"{case}_DE-111.pdf"
+        if named.is_file():
+            return named
+        if folder.is_dir():
+            for path in sorted(folder.glob("*_petition.pdf")):
+                if path.is_file():
+                    return path
+            for path in sorted(folder.glob("*.pdf")):
+                upper = path.name.upper()
+                if (
+                    path.is_file()
+                    and "_DE-147" not in upper
+                    and "_DE-150" not in upper
+                    and "_DE-160" not in upper
+                    and "_DE-161" not in upper
+                ):
+                    return path
     return None
 
 
@@ -2304,22 +2751,97 @@ def _duties_pdf_path(row: dict) -> Path | None:
         if path.is_file() and path.stat().st_size > 4:
             return path
     case = petition_safe_case(case_key(row))
-    docs = Path(os.environ.get("FUB_PETITION_DOCS_DIR") or "")
-    if not docs.is_dir() or not case:
+    if not case:
         return None
-    named = docs / case / f"{case}_DE-147.pdf"
-    return named if named.is_file() else None
+    for docs in _petition_docs_search_dirs(row):
+        named = docs / case / f"{case}_DE-147.pdf"
+        if named.is_file():
+            return named
+    return None
 
 
-def stored_person_id(state: dict, key: str) -> int | None:
-    record = (state.get("cases") or {}).get(key) or {}
-    raw = record.get("fub_person_id")
+def _letters_pdf_path(row: dict) -> Path | None:
+    raw = str(row.get("letters_pdf") or "").strip()
+    if raw:
+        path = Path(raw)
+        if path.is_file() and path.stat().st_size > 4:
+            return path
+    case = petition_safe_case(case_key(row))
+    if not case:
+        return None
+    for docs in _petition_docs_search_dirs(row):
+        named = docs / case / f"{case}_DE-150.pdf"
+        if named.is_file():
+            return named
+    return None
+
+
+def _parse_fub_person_id(raw) -> int | None:
     if raw in (None, "", 0, "0"):
         return None
     try:
         return int(raw)
     except (TypeError, ValueError):
         return None
+
+
+def stored_person_id(
+    state: dict, key: str | None, row: dict | None = None
+) -> int | None:
+    record = (state.get("cases") or {}).get(key) or {} if key else {}
+    pid = _parse_fub_person_id(record.get("fub_person_id"))
+    if pid is not None:
+        return pid
+    if row:
+        return _parse_fub_person_id(row.get("fub_person_id"))
+    return None
+
+
+def is_fub_removed(state: dict, key: str | None, row: dict | None = None) -> bool:
+    record = (state.get("cases") or {}).get(key) or {} if key else {}
+    if bool(record.get("fub_removed")):
+        return True
+    return bool(row and row.get("fub_removed"))
+
+
+def needs_fub_create(
+    state: dict, key: str | None, row: dict | None = None
+) -> bool:
+    """True when this listing has no Follow Up Boss person id.
+
+    CNPA/email SEEN in seen_cases*.json is not a substitute. Recreate is
+    skipped only when the person was deleted in Follow Up Boss (fub_removed).
+    A listings.json / row fub_person_id also counts as already created.
+    """
+    if is_fub_removed(state, key, row):
+        return False
+    return stored_person_id(state, key, row) is None
+
+
+def should_skip_unchanged_person(
+    *,
+    existing_id: int | None,
+    record: dict,
+    fingerprint: str,
+    verify: bool,
+    update_existing: bool,
+) -> bool:
+    """Skip PUT when this listing already has a FUB person and fields are unchanged.
+
+    Harvest still updates the existing person when the payload fingerprint
+    changes (new address, phone, decedent residence, etc.). Force, verify, and
+    FUB_UPDATE_EXISTING always PUT. Listings with no person id POST/create.
+    """
+    if existing_id is None:
+        return False
+    if verify or update_existing:
+        return False
+    return bool(record.get("fub_fingerprint") == fingerprint)
+
+
+def _one_person_verify_run(*, verify: bool, update_existing: bool) -> bool:
+    """Verify-only stops after one POST/PUT unless Force PUT is on."""
+    return bool(verify) and not bool(update_existing)
 
 
 def _rows_for_export(rows: list[dict], state: dict, *, verify: bool) -> list[dict]:
@@ -2338,7 +2860,8 @@ def _rows_for_export(rows: list[dict], state: dict, *, verify: bool) -> list[dic
             existing.append(row)
         else:
             fresh.append(row)
-    return preferred + existing + fresh
+    # Verify-only should try a create first (UI: one new go-case), not PUT an existing id.
+    return preferred + fresh + existing
 
 
 def _forced_verify_person_id() -> int | None:
@@ -2355,6 +2878,27 @@ def is_new_row(row: dict) -> bool:
     return bool(row.get("first_seen") or str(row.get("status") or "").lower() == "new")
 
 
+def _row_is_fiduciary_petitioner(row: dict) -> bool:
+    """Skip GO/FUB when the petitioner (not the attached will) is a fiduciary."""
+    try:
+        from .petition_parse import (
+            is_fiduciary_petitioner_name,
+            row_indicates_professional_fiduciary,
+            stamp_row_professional_fiduciary,
+        )
+    except ImportError:
+        from petition_parse import (
+            is_fiduciary_petitioner_name,
+            row_indicates_professional_fiduciary,
+            stamp_row_professional_fiduciary,
+        )
+
+    stamp_row_professional_fiduciary(row)
+    if row_indicates_professional_fiduciary(row):
+        return True
+    return is_fiduciary_petitioner_name(portal_petitioner(row))
+
+
 def gate_reason(
     row: dict,
     state: dict,
@@ -2362,46 +2906,402 @@ def gate_reason(
     *,
     strict_property: bool,
     existing_id: int | None,
-    allow_seen_without_fub: bool = False,
+    allow_seen_without_fub: bool = True,
+    required_fields=None,
 ) -> str | None:
+    """Data-quality gate only.
+
+    Presence in seen_cases / seen_cases_sacramento without a Follow Up Boss
+    person id is not a skip. Callers must POST/create those listings.
+    ``allow_seen_without_fub`` is kept for callers and always treated as true.
+    Required fields come from the saved Follow Up Boss “Required for Go” list
+    for Path A. Path B is always an alternate: petitioner, decedent, decedent
+    address, and petitioner phone. Case number is never required.
+    """
+    del allow_seen_without_fub
+    required = set(
+        resolve_fub_go_required_fields(
+            required_fields, strict_property=strict_property
+        )
+    )
+    required.discard("case_number")
     key = case_key(row)
-    if not key:
-        return "missing_case_number"
-    petitioner = portal_petitioner(row)
-    first, last = split_person_name(petitioner)
-    if not first or not last:
-        return "petitioner_name_incomplete"
+    if is_fub_removed(state, key, row):
+        return "fub_removed"
+    petitioner, _first, _last = _petitioner_name_parts(row)
+    if _row_is_fiduciary_petitioner(row):
+        return "professional_fiduciary"
+    real_gmv = _estate_real_amount(row)
+    if real_gmv is None:
+        return NOGO_MISSING_ESTATE_REAL
+    if real_gmv < MIN_ESTATE_REAL_GMV:
+        return NOGO_ESTATE_REAL_BELOW_MIN
     skip_bits = [str(x).lower() for x in mapping.get("skip_petitioner_contains") or []]
     low = petitioner.lower()
     if any(bit in low for bit in skip_bits if bit):
         return "petitioner_skipped"
-    # Sacramento's public summary has no petitioner mailing address.
-    # Placer still requires the DE-111 / DE-147 address.
-    if _row_source_key(row) != "sacramento":
-        if not str(_row_contact(row).get("mailing_address") or row.get("mailing_address") or "").strip():
-            return "missing_petitioner_address"
-    if (
-        existing_id is None
-        and strict_property
-        and not str(row.get("decedent_residence") or "").strip()
-    ):
-        return "missing_decedent_residence"
-    return None
+    path_a = _path_a_reason(row, required, existing_id)
+    if path_a is None:
+        return None
+    path_b = _path_b_reason(row)
+    if path_b is None:
+        return None
+    return path_a
+
+
+GO_STATUS_GO = "GO"
+GO_STATUS_NOGO = "NO-GO"
+
+
+def listing_as_harvest_row(listing: dict | None) -> dict:
+    """Map a listings.json record onto harvest-row keys for gate_reason."""
+    rec = dict(listing or {})
+    if rec.get("petitioner_address") and not rec.get("mailing_address"):
+        rec["mailing_address"] = rec.get("petitioner_address")
+    if rec.get("decedent_address") and not rec.get("decedent_residence"):
+        rec["decedent_residence"] = rec.get("decedent_address")
+    return rec
+
+
+def _listings_catalog(data_dir: Path) -> dict[str, dict]:
+    catalog: dict[str, dict] = {}
+    for name in ("listings.json", "listings_sacramento.json"):
+        path = Path(data_dir) / name
+        if not path.exists():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        items = payload.get("listings") if isinstance(payload, dict) else payload
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("case_number") or "").strip()
+            if not key:
+                continue
+            prev = catalog.get(key) or {}
+            merged = dict(prev)
+            merged.update({k: v for k, v in item.items() if v not in (None, "", [], {})})
+            if prev.get("fub_removed") or item.get("fub_removed"):
+                merged["fub_removed"] = True
+            catalog[key] = merged
+    return catalog
+
+
+def _seen_fub_records(data_dir: Path) -> dict[str, dict]:
+    index: dict[str, dict] = {}
+    for name in ("seen_cases.json", "seen_cases_sacramento.json"):
+        path = Path(data_dir) / name
+        if not path.exists():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        cases = payload.get("cases") if isinstance(payload, dict) else None
+        if not isinstance(cases, dict):
+            continue
+        for key, rec in cases.items():
+            case = str(key or "").strip()
+            if not case or not isinstance(rec, dict):
+                continue
+            prev = index.get(case) or {}
+            merged = dict(prev)
+            merged.update({k: v for k, v in rec.items() if v not in (None, "", [], {})})
+            if prev.get("fub_removed") or rec.get("fub_removed"):
+                merged["fub_removed"] = True
+            if prev.get("fub_person_id") and not merged.get("fub_person_id"):
+                merged["fub_person_id"] = prev.get("fub_person_id")
+            index[case] = merged
+    return index
+
+
+def persist_fub_removed_on_listings(data_dir: Path | None, cases: dict | None) -> None:
+    """Keep deleted Follow Up Boss people marked on stored listings."""
+    if data_dir is None:
+        return
+    removed = {
+        str(key).strip(): rec
+        for key, rec in (cases or {}).items()
+        if str(key or "").strip() and isinstance(rec, dict) and rec.get("fub_removed")
+    }
+    if not removed:
+        return
+    for name in ("listings.json", "listings_sacramento.json"):
+        path = Path(data_dir) / name
+        if not path.exists():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        items = payload.get("listings") if isinstance(payload, dict) else payload
+        if not isinstance(items, list):
+            continue
+        changed = False
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("case_number") or "").strip()
+            rec = removed.get(key)
+            if rec is None:
+                continue
+            if not item.get("fub_removed"):
+                changed = True
+            item["fub_removed"] = True
+            item["go_status"] = "NO-GO"
+            item["nogo_reason"] = "fub_removed"
+            pid = rec.get("fub_person_id")
+            if pid not in (None, "", 0, "0") and not item.get("fub_person_id"):
+                item["fub_person_id"] = pid
+                changed = True
+        if not changed:
+            continue
+        if isinstance(payload, dict):
+            payload["listings"] = items
+            text = json.dumps(payload, indent=2, default=str)
+        else:
+            text = json.dumps(items, indent=2, default=str)
+        path.write_text(text, encoding="utf-8")
+
+
+def stored_rows_for_fub_one(
+    data_dir: Path,
+    source_id: str | None = None,
+    person_id: int | str | None = None,
+) -> list[dict]:
+    """Harvest-shaped rows from stored listings.json, plus on-disk PDF paths."""
+    try:
+        from .datasources import local_de111_pdf, local_de147_pdf
+    except ImportError:
+        from datasources import local_de111_pdf, local_de147_pdf
+
+    wanted = str(source_id or "").strip().lower()
+    wanted_pid = _parse_fub_person_id(person_id)
+    catalog = _listings_catalog(data_dir)
+    seen = _seen_fub_records(data_dir)
+    reports = Path(data_dir) / "reports"
+    docs_dirs = (
+        reports / "docs",
+        reports / "sacramento" / "docs",
+    )
+    rows: list[dict] = []
+    for listing in catalog.values():
+        rec = listing_as_harvest_row(listing)
+        case = str(rec.get("case_number") or "").strip()
+        flags = seen.get(case) or {}
+        if flags.get("fub_removed") or rec.get("fub_removed"):
+            rec["fub_removed"] = True
+        if flags.get("fub_person_id") and not rec.get("fub_person_id"):
+            rec["fub_person_id"] = flags.get("fub_person_id")
+        sid = str(rec.get("source_id") or "").strip().lower()
+        if wanted and sid and sid != wanted:
+            continue
+        if wanted_pid is not None and _parse_fub_person_id(rec.get("fub_person_id")) != wanted_pid:
+            continue
+        for docs in docs_dirs:
+            if rec.get("petition_pdf") and rec.get("duties_pdf"):
+                break
+            if docs.exists() and case:
+                de111 = local_de111_pdf(docs, case)
+                if de111 and not rec.get("petition_pdf"):
+                    rec["petition_pdf"] = str(de111)
+                de147 = local_de147_pdf(docs, case)
+                if de147 and not rec.get("duties_pdf"):
+                    rec["duties_pdf"] = str(de147)
+        rows.append(rec)
+    if wanted_pid is not None and not rows:
+        for name, default_source in (
+            ("seen_cases.json", "placer"),
+            ("seen_cases_sacramento.json", "sacramento"),
+        ):
+            path = Path(data_dir) / name
+            if not path.exists():
+                continue
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                continue
+            cases = payload.get("cases") if isinstance(payload, dict) else None
+            if not isinstance(cases, dict):
+                continue
+            for case, record in cases.items():
+                if not isinstance(record, dict):
+                    continue
+                if _parse_fub_person_id(record.get("fub_person_id")) != wanted_pid:
+                    continue
+                listing = catalog.get(str(case)) or {
+                    "case_number": case,
+                    "source_id": default_source,
+                    "fub_person_id": wanted_pid,
+                }
+                rec = listing_as_harvest_row(listing)
+                rec["fub_person_id"] = wanted_pid
+                rec.setdefault("source_id", default_source)
+                rows.append(rec)
+    rows.sort(
+        key=lambda row: str(
+            row.get("last_collected") or row.get("added_at") or row.get("date") or ""
+        ),
+        reverse=True,
+    )
+    return rows
+
+
+def listing_go_fields(
+    row: dict | None,
+    *,
+    state: dict | None = None,
+    mapping: dict | None = None,
+    required_fields=None,
+    strict_property: bool | None = None,
+) -> tuple[str, str]:
+    """Return (go_status, nogo_reason) for a harvest or listing row.
+
+    GO rows use nogo_reason path_a / path_b. NO-GO rows use the gate reason.
+    Does not call Follow Up Boss.
+    """
+    harvest = listing_as_harvest_row(row)
+    source_id = _row_source_id(harvest)
+    if mapping is None:
+        mapping = mapping_for_export(load_mapping(), source_id)
+    else:
+        mapping = mapping_for_export(mapping, source_id)
+    key = case_key(harvest)
+    gate_state = {"cases": {}}
+    if state and isinstance(state.get("cases"), dict):
+        gate_state = state
+    elif harvest.get("fub_removed") and key:
+        gate_state = {"cases": {key: {"fub_removed": True}}}
+    if strict_property is None:
+        strict_property = _env_bool("FUB_STRICT_PROPERTY")
+    required = set(
+        resolve_fub_go_required_fields(
+            required_fields, strict_property=strict_property
+        )
+    )
+    required.discard("case_number")
+    existing_id = stored_person_id(gate_state, key, harvest)
+    reason = gate_reason(
+        harvest,
+        gate_state,
+        mapping,
+        strict_property=strict_property,
+        existing_id=existing_id,
+        required_fields=required_fields,
+    )
+    if reason:
+        return GO_STATUS_NOGO, reason
+    path_a = _path_a_reason(harvest, required, existing_id)
+    if path_a is None:
+        return GO_STATUS_GO, "path_a"
+    return GO_STATUS_GO, "path_b"
+
+
+def apply_listing_go(
+    row: dict,
+    *,
+    state: dict | None = None,
+    mapping: dict | None = None,
+    required_fields=None,
+    strict_property: bool | None = None,
+) -> dict:
+    status, reason = listing_go_fields(
+        row,
+        state=state,
+        mapping=mapping,
+        required_fields=required_fields,
+        strict_property=strict_property,
+    )
+    row["go_status"] = status
+    row["nogo_reason"] = reason
+    return row
+
+
+def listing_go_reason_label(reason: str | None) -> str:
+    raw = str(reason or "").strip()
+    if raw == "path_a":
+        return "Path A"
+    if raw == "path_b":
+        return "Path B"
+    if raw == NOGO_MISSING_ESTATE_REAL:
+        return "Real property GMV missing"
+    if raw == NOGO_ESTATE_REAL_BELOW_MIN:
+        return "Real property GMV under $200,000"
+    return raw
 
 
 def preview_one_record(
     rows: list[dict],
     *,
     mapping_path: Path | None = None,
+    person_id: int | str | None = None,
 ) -> dict:
-    mapping = load_mapping(mapping_path)
-    source_id = _datasources().county_key(os.environ.get("PROBATE_COUNTY"))
-    source_fields = custom_fields_for_source(mapping, source_id)
-    if source_id != "placer" and source_fields:
-        mapping = dict(mapping)
-        mapping["custom_fields"] = source_fields
+    wanted = _parse_fub_person_id(person_id)
+    work = [listing_as_harvest_row(item) for item in rows]
+    if wanted is not None:
+        work = [
+            row
+            for row in work
+            if _parse_fub_person_id(row.get("fub_person_id")) == wanted
+        ]
+        if not work:
+            note = f"No stored listing has Follow Up Boss person {wanted}."
+            print(f"FUB preview: {note}", flush=True)
+            return {
+                "ok": False,
+                "verify_record": None,
+                "verify_note": note,
+                "skips": [],
+            }
+        row = work[0]
+        source_id = _row_source_id(row)
+        mapping = mapping_for_export(load_mapping(mapping_path), source_id)
+        settings = {
+            "source": mapping.get("lead_source") or os.environ.get("FUB_SOURCE", "probate"),
+            "assigned_to": os.environ.get("FUB_ASSIGNED_TO", "Blake Hammond"),
+            "stage": (os.environ.get("FUB_STAGE") or "").strip(),
+            "event_type": os.environ.get("FUB_EVENT_TYPE", "Seller Inquiry"),
+        }
+        strict = _env_bool("FUB_STRICT_PROPERTY")
+        reason = gate_reason(
+            row,
+            {"cases": {}},
+            mapping,
+            strict_property=strict,
+            existing_id=wanted,
+        )
+        person = build_person(
+            row,
+            mapping,
+            settings,
+            person_id=wanted,
+            allowed_custom=fub_custom_field_names(),
+        )
+        record = verify_record_payload(row, person, wanted, settings, mapping)
+        record["view_only"] = True
+        record["posted"] = False
+        record["gate"] = "no-go" if reason else "go"
+        if reason:
+            record["gate_reason"] = reason
+        print(
+            f"FUB preview: {case_key(row)} person_id={wanted} "
+            f"(view only, not posted)",
+            flush=True,
+        )
+        return {
+            "ok": True,
+            "verify_record": record,
+            "verify_note": None,
+            "skips": [{"case": case_key(row), "reason": reason}] if reason else [],
+        }
+    source_id = _row_source_id(work[0] if work else None)
+    mapping = mapping_for_export(load_mapping(mapping_path), source_id)
     settings = {
-        "source": os.environ.get("FUB_SOURCE", "probate"),
+        "source": mapping.get("lead_source") or os.environ.get("FUB_SOURCE", "probate"),
         "assigned_to": os.environ.get("FUB_ASSIGNED_TO", "Blake Hammond"),
         "stage": (os.environ.get("FUB_STAGE") or "").strip(),
         "event_type": os.environ.get("FUB_EVENT_TYPE", "Seller Inquiry"),
@@ -2410,7 +3310,7 @@ def preview_one_record(
     skips: list[dict] = []
     blank_state: dict = {"cases": {}}
     first_skip_record = None
-    for row in rows:
+    for row in work:
         key = case_key(row)
         reason = gate_reason(
             row,
@@ -2418,7 +3318,6 @@ def preview_one_record(
             mapping,
             strict_property=strict,
             existing_id=None,
-            allow_seen_without_fub=True,
         )
         if reason:
             print(
@@ -2479,14 +3378,103 @@ def preview_one_record(
     }
 
 
+def score_stored_rows(
+    rows: list[dict],
+    *,
+    mapping_path: Path | None = None,
+) -> dict:
+    """Apply the current Go checklist to already-parsed local rows. No FUB POST."""
+    mapping = mapping_for_export(
+        load_mapping(mapping_path),
+        _row_source_id(rows[0] if rows else None),
+    )
+    strict = _env_bool("FUB_STRICT_PROPERTY")
+    blank_state: dict = {"cases": {}}
+    cases: list[dict] = []
+    skips: list[dict] = []
+    go = 0
+    nogo = 0
+    for row in rows:
+        key = case_key(row)
+        reason = gate_reason(
+            row,
+            blank_state,
+            mapping,
+            strict_property=strict,
+            existing_id=None,
+        )
+        if reason:
+            nogo += 1
+            skips.append({"case": key, "reason": reason})
+            gate = "no-go"
+        else:
+            go += 1
+            gate = "go"
+        cases.append(
+            {
+                "case": key,
+                "gate": gate,
+                "reason": reason or "",
+                "petitioner": portal_petitioner(row) or row.get("petitioner") or "",
+                "decedent": row.get("decedent") or "",
+                "mailing_address": row.get("mailing_address") or "",
+                "decedent_residence": row.get("decedent_residence") or "",
+                "petition_pdf": Path(str(row.get("petition_pdf") or "")).name,
+                "duties_pdf": Path(str(row.get("duties_pdf") or "")).name,
+            }
+        )
+        print(
+            f"Stored test {key}: {gate}"
+            + (f" ({reason})" if reason else ""),
+            flush=True,
+        )
+    note = (
+        f"Stored test: {go} GO / {nogo} no-go using the current Required for Go list. "
+        "Follow Up Boss was not updated. Seen-cases were not updated. No CNPA or court."
+    )
+    return {
+        "ok": True,
+        "posted": 0,
+        "updated": 0,
+        "skipped": nogo,
+        "error": None,
+        "stored_test": True,
+        "preview": False,
+        "go_count": go,
+        "nogo_count": nogo,
+        "cases": cases,
+        "skips": skips,
+        "verify_note": note,
+        "verify_record": None,
+    }
+
+
+def _row_source_id(row: dict | None = None) -> str:
+    return (
+        str(
+            (row or {}).get("source_id")
+            or os.environ.get("FUB_DATA_SOURCE")
+            or "placer"
+        )
+        .strip()
+        .lower()
+        or "placer"
+    )
+
+
+def _fub_lead_source_name(row: dict | None = None, source_id: str | None = None) -> str:
+    key = str(source_id or "").strip().lower() or _row_source_id(row)
+    try:
+        return fub_lead_source(key)
+    except ValueError:
+        return str((row or {}).get("lead_source") or "").strip()
+
+
 def _court_search_note(row: dict, mapping: dict) -> str:
     portal = case_portal_url(row)
     if portal:
         return portal
-    sacramento = _row_source_key(row) == "sacramento"
-    url = str(mapping.get("court_search_url") or "").strip()
-    if not url or (sacramento and "placerco.org" in url):
-        url = SACRAMENTO_COURT_SEARCH if sacramento else COURT_SEARCH_DEFAULT
+    url = mapping.get("court_search_url") or COURT_SEARCH_DEFAULT
     case = case_key(row)
     return f"{url} (paste {case} if the case page is missing)"
 
@@ -2505,9 +3493,9 @@ def build_person(
     person: dict = {}
     if person_id is not None:
         person["id"] = int(person_id)
-    if send.get("firstName", True):
+    if send.get("firstName", True) and first:
         person["firstName"] = first
-    if send.get("lastName", True):
+    if send.get("lastName", True) and last:
         person["lastName"] = last
     if send.get("assignedTo", True) and settings.get("assigned_to"):
         person["assignedTo"] = settings["assigned_to"]
@@ -2561,7 +3549,7 @@ def build_person(
                 )
                 continue
             if target == "tags":
-                person["tags"] = _merge_tag_list(_row_fub_tags(row), str(value))
+                person["tags"] = [str(value)]
                 continue
             if target in PERSON_BUILTIN_TARGETS:
                 person[target] = str(value)
@@ -2569,14 +3557,27 @@ def build_person(
             if not _can_send_custom_field(api_name, allowed_custom):
                 continue
             person[str(api_name)] = str(value)
-    if "tags" not in person:
-        tags = _row_fub_tags(row)
-        if tags:
-            person["tags"] = tags
     notes = combined_notes(row, mapping)
     if notes:
         person["background"] = notes
     _flush_address_slots(person)
+    county_tags = row.get("tags")
+    if not county_tags:
+        source = _row_source_id(row)
+        try:
+            from .datasources import fub_tags
+        except ImportError:
+            from datasources import fub_tags
+
+        try:
+            county_tags = fub_tags(source)
+        except ValueError:
+            county_tags = ["probate"]
+    if county_tags:
+        person["tags"] = list(county_tags)
+    lead_source = _fub_lead_source_name(row)
+    if lead_source:
+        person["source"] = lead_source
     return person
 
 
@@ -2611,11 +3612,13 @@ def verify_record_payload(
         addr = person["addresses"][0] if isinstance(person["addresses"][0], dict) else {}
         if len(person["addresses"]) > 1 and isinstance(person["addresses"][1], dict):
             addr2 = person["addresses"][1]
-    source_id = _row_source_key(row)
-    source_name = f"{_datasources().normalize_county_name(source_id)} County"
+    source_id = _row_source_id(row)
     return {
-        "data_source": source_id if source_id in {"placer", "sacramento"} else "placer",
-        "data_source_name": source_name,
+        "data_source": source_id,
+        "source_id": source_id,
+        "data_source_name": (
+            "Sacramento County" if source_id == "sacramento" else "Placer County"
+        ),
         "gate": "go",
         "case_number": case_key(row),
         "fub_person_id": int(pid) if pid else None,
@@ -2624,7 +3627,10 @@ def verify_record_payload(
         "lastName": person.get("lastName"),
         "assignedTo": person.get("assignedTo"),
         "stage": person.get("stage"),
-        "lead_source": settings.get("source"),
+        "lead_source": person.get("source")
+        or mapping.get("lead_source")
+        or _fub_lead_source_name(row)
+        or settings.get("source"),
         "event_type": settings.get("event_type"),
         "decedent": row.get("decedent"),
         "decedent_residence": row.get("decedent_residence"),
@@ -2636,6 +3642,7 @@ def verify_record_payload(
         "court_url": values.get("court_url") or values.get("court_search"),
         "de111_url": values.get("de111_url") or "",
         "de147_url": values.get("de147_url") or "",
+        "de150_url": values.get("de150_url") or "",
         "de111_file": (
             str(_petition_pdf_path(row) or "")
             if (mapping.get("send") or {}).get("de111_file", True)
@@ -2679,13 +3686,22 @@ def build_event(
     allowed_custom: set[str] | None = None,
 ) -> dict:
     send = mapping.get("send") or {}
-    decedent = str(row.get("decedent") or "").strip()
+    decedent = _row_decedent_name(row)
     case = case_key(row)
     court_note = _court_search_note(row, mapping)
-    message = (
-        f"Estate of {decedent or '(unknown)'}. Case {case}. "
-        f"Search eCourt first: {court_note}."
-    )
+    source_id = _row_source_id(row)
+    if source_id == "sacramento":
+        message = (
+            f"Estate of {decedent or '(unknown)'}. Case {case}. "
+            f"Journal Technologies public portal: {court_note}."
+        )
+        court_label = "Journal Technologies node/397"
+    else:
+        message = (
+            f"Estate of {decedent or '(unknown)'}. Case {case}. "
+            f"Search eCourt first: {court_note}."
+        )
+        court_label = "eCourt"
     if row.get("notice_url"):
         message += f" Notice: {row['notice_url']}"
     if person is None:
@@ -2702,16 +3718,343 @@ def build_event(
         "person": _person_api_body(person),
     }
     if person_id is None and send.get("source", True):
-        event["source"] = settings.get("source") or "probate"
+        event["source"] = (
+            (person or {}).get("source")
+            or _fub_lead_source_name(row)
+            or settings.get("source")
+            or "probate"
+        )
     if send.get("message", True):
         event["message"] = message
         event["description"] = (
             f"Estate location (DE-111 3.a.(2), not place of death): "
             f"{row.get('decedent_residence') or '—'}. "
             f"Hearing: {row.get('next_event') or row.get('hearing') or '—'}. "
-            f"eCourt: {case_portal_url(row) or court_note}."
+            f"{court_label}: {case_portal_url(row) or court_note}."
         )
     return event
+
+
+FUB_REVIEW_GATE_COLUMNS = (
+    ("would_post", "would_post"),
+    ("would_put", "would_put"),
+    ("would_skip", "would_skip"),
+    ("skip_reason", "skip_reason"),
+    ("case_number", "case_number"),
+    ("county", "county"),
+    ("fub_person_id", "fub_person_id"),
+    ("go_status", "go_status"),
+    ("nogo_reason", "nogo_reason"),
+    ("gmv_real", "gmv_real"),
+    ("estate_real", "estate_real"),
+    ("petition_ocr", "petition_ocr"),
+)
+FUB_REVIEW_LEAD_COLUMNS = FUB_REVIEW_GATE_COLUMNS
+FUB_REVIEW_PERSON_COLUMNS = (
+    ("firstName", "firstName"),
+    ("lastName", "lastName"),
+    ("emails", "emails"),
+    ("phones", "phones"),
+    ("assignedTo", "assignedTo"),
+    ("stage", "stage"),
+    ("source", "source"),
+    ("tags", "tags"),
+    ("background", "background"),
+    ("address1_street", "address1_street"),
+    ("address1_city", "address1_city"),
+    ("address1_state", "address1_state"),
+    ("address1_code", "address1_code"),
+    ("address1_type", "address1_type"),
+    ("address2_street", "address2_street"),
+    ("address2_city", "address2_city"),
+    ("address2_state", "address2_state"),
+    ("address2_code", "address2_code"),
+    ("address2_type", "address2_type"),
+)
+FUB_REVIEW_NOTE_COLUMNS = (
+    ("note_subject", "note_subject"),
+    ("note_body", "note_body"),
+    ("event_type", "event_type"),
+    ("event_source", "event_source"),
+    ("event_system", "event_system"),
+    ("event_message", "event_message"),
+    ("event_description", "event_description"),
+    ("put_person_json", "put_person_json"),
+    ("post_event_json", "post_event_json"),
+)
+FUB_REVIEW_EVENT_COLUMNS = FUB_REVIEW_NOTE_COLUMNS
+FUB_REVIEW_PERSON_PAYLOAD_KEYS = {
+    "firstName",
+    "lastName",
+    "emails",
+    "phones",
+    "assignedTo",
+    "stage",
+    "source",
+    "tags",
+    "background",
+    "addresses",
+}
+
+
+def _review_join_contacts(items) -> str:
+    if not items:
+        return ""
+    if isinstance(items, str):
+        return items
+    parts: list[str] = []
+    for item in items:
+        if isinstance(item, dict):
+            text = str(item.get("value") or "").strip()
+        else:
+            text = str(item or "").strip()
+        if text:
+            parts.append(text)
+    return "; ".join(parts)
+
+
+def _review_addr(person: dict, index: int) -> dict:
+    addrs = person.get("addresses") if isinstance(person.get("addresses"), list) else []
+    item = addrs[index] if index < len(addrs) and isinstance(addrs[index], dict) else {}
+    return {
+        "street": str(item.get("street") or ""),
+        "city": str(item.get("city") or ""),
+        "state": str(item.get("state") or ""),
+        "code": str(item.get("code") or item.get("postalCode") or ""),
+        "type": str(item.get("type") or ""),
+    }
+
+
+def _review_cell(value) -> str:
+    if value is None or value is False:
+        return ""
+    if value is True:
+        return "true"
+    if isinstance(value, (list, tuple)):
+        return "; ".join(str(item) for item in value if item not in (None, ""))
+    return str(value)
+
+
+def fub_review_settings() -> dict:
+    return {
+        "source": os.environ.get("FUB_SOURCE", "probate"),
+        "assigned_to": os.environ.get("FUB_ASSIGNED_TO", "Blake Hammond"),
+        "stage": (os.environ.get("FUB_STAGE") or "").strip(),
+        "event_type": os.environ.get("FUB_EVENT_TYPE", "Seller Inquiry"),
+    }
+
+
+def _review_custom_api_names(mapping: dict | None) -> list[str]:
+    """FUB custom field API names that become top-level person keys."""
+    names: list[str] = []
+    seen: set[str] = set()
+    blocks: list[dict] = [dict((mapping or {}).get("custom_fields") or {})]
+    for block in ((mapping or {}).get("source_mappings") or {}).values():
+        if isinstance(block, dict):
+            nested = block.get("custom_fields") or {}
+            if isinstance(nested, dict):
+                blocks.append(nested)
+    for fields in blocks:
+        for api_name in fields.values():
+            raw = str(api_name or "").strip()
+            if not raw:
+                continue
+            target = raw.split(".", 1)[1] if raw.lower().startswith("person.") else raw
+            if (
+                target in PERSON_BUILTIN_TARGETS
+                or target.lower() in ADDRESS_SLOT_TARGETS
+                or _is_notes_target(target)
+            ):
+                continue
+            if raw not in seen:
+                seen.add(raw)
+                names.append(raw)
+    return names
+
+
+def _review_payload_json(payload: dict) -> str:
+    return json.dumps(payload, default=str, ensure_ascii=False)
+
+
+def _review_export_action(
+    go_status: str,
+    person_id: int | None,
+    gmv: float | None,
+    nogo_reason: str,
+) -> tuple[str, str, str, str]:
+    """Return would_post, would_put, would_skip, skip_reason. Never calls FUB."""
+    is_go = str(go_status or "").strip() == GO_STATUS_GO
+    gmv_ok = gmv is not None and gmv >= MIN_ESTATE_REAL_GMV
+    if is_go and person_id is not None:
+        return "false", "true", "false", ""
+    if is_go and gmv_ok:
+        return "true", "false", "false", ""
+    reason = str(nogo_reason or "").strip()
+    if is_go and not gmv_ok:
+        reason = (
+            NOGO_MISSING_ESTATE_REAL if gmv is None else NOGO_ESTATE_REAL_BELOW_MIN
+        )
+    elif not reason:
+        reason = "not_go"
+    return "false", "false", "true", reason
+
+
+def fub_review_columns(mapping: dict | None = None) -> list[tuple[str, str]]:
+    cols = list(
+        FUB_REVIEW_GATE_COLUMNS
+        + FUB_REVIEW_PERSON_COLUMNS
+        + FUB_REVIEW_NOTE_COLUMNS
+    )
+    seen = {key for key, _header in cols}
+    for api_name in _review_custom_api_names(mapping):
+        if api_name not in seen:
+            cols.append((api_name, api_name))
+            seen.add(api_name)
+    return cols
+
+
+def build_fub_review_row(
+    listing: dict,
+    mapping: dict | None = None,
+    settings: dict | None = None,
+) -> dict:
+    """One stored listing as the exact local POST/PUT person payload. No FUB HTTP."""
+    harvest = listing_as_harvest_row(listing)
+    source_id = _row_source_id(harvest)
+    mapped = mapping_for_export(mapping or {}, source_id)
+    cfg = settings or fub_review_settings()
+    apply_listing_go(harvest, mapping=mapped)
+    go_status = str(harvest.get("go_status") or "")
+    nogo = str(harvest.get("nogo_reason") or "")
+    raw_id = harvest.get("fub_person_id")
+    if raw_id in (None, ""):
+        raw_id = listing.get("fub_person_id")
+    person_id = None
+    if raw_id not in (None, "", 0, "0"):
+        try:
+            person_id = int(raw_id)
+        except (TypeError, ValueError):
+            person_id = None
+    person = build_person(
+        harvest,
+        mapped,
+        cfg,
+        person_id=person_id,
+        allowed_custom=None,
+    )
+    event = build_event(
+        harvest,
+        mapped,
+        cfg,
+        person=person,
+        person_id=person_id,
+        allowed_custom=None,
+    )
+    addr1 = _review_addr(person, 0)
+    addr2 = _review_addr(person, 1)
+    county = str(
+        harvest.get("source")
+        or listing.get("source")
+        or ("Sacramento County" if source_id == "sacramento" else "Placer County")
+    )
+    gmv_raw = (
+        harvest.get("estate_real")
+        if harvest.get("estate_real") not in (None, "")
+        else listing.get("estate_real")
+    )
+    gmv_plain = _gmv_plain_field(gmv_raw)
+    gmv_amount = _estate_real_amount({"estate_real": gmv_raw})
+    would_post, would_put, would_skip, skip_reason = _review_export_action(
+        go_status, person_id, gmv_amount, nogo
+    )
+    note_text = combined_notes(harvest, mapped)
+    row: dict[str, str] = {
+        "would_post": would_post,
+        "would_put": would_put,
+        "would_skip": would_skip,
+        "skip_reason": skip_reason,
+        "case_number": case_key(harvest),
+        "county": county,
+        "fub_person_id": "" if person_id is None else str(person_id),
+        "go_status": go_status,
+        "nogo_reason": nogo,
+        "gmv_real": gmv_plain,
+        "estate_real": gmv_plain,
+        "petition_ocr": (
+            "true"
+            if harvest.get("petition_ocr")
+            or listing.get("petition_ocr")
+            or harvest.get("duties_ocr")
+            or listing.get("duties_ocr")
+            or harvest.get("petition_ocr_gmv")
+            or listing.get("petition_ocr_gmv")
+            else ""
+        ),
+        "firstName": _review_cell(person.get("firstName")),
+        "lastName": _review_cell(person.get("lastName")),
+        "emails": _review_join_contacts(person.get("emails")),
+        "phones": _review_join_contacts(person.get("phones")),
+        "assignedTo": _review_cell(person.get("assignedTo")),
+        "stage": _review_cell(person.get("stage")),
+        "source": _review_cell(person.get("source")),
+        "tags": _review_cell(person.get("tags")),
+        "background": _review_cell(person.get("background")),
+        "address1_street": addr1["street"],
+        "address1_city": addr1["city"],
+        "address1_state": addr1["state"],
+        "address1_code": addr1["code"],
+        "address1_type": addr1["type"],
+        "address2_street": addr2["street"],
+        "address2_city": addr2["city"],
+        "address2_state": addr2["state"],
+        "address2_code": addr2["code"],
+        "address2_type": addr2["type"],
+        "note_subject": probate_note_subject(harvest),
+        "note_body": _with_probate_note_marker(note_text),
+        "event_type": _review_cell(event.get("type")),
+        "event_source": _review_cell(event.get("source")),
+        "event_system": _review_cell(event.get("system")),
+        "event_message": _review_cell(event.get("message")),
+        "event_description": _review_cell(event.get("description")),
+        "put_person_json": _review_payload_json(_person_api_body(person)),
+        "post_event_json": _review_payload_json(event),
+    }
+    for api_name in _review_custom_api_names(mapped):
+        row[api_name] = _review_cell(person.get(api_name))
+    for key, value in person.items():
+        if key in {"id", "_addr_slots"} or key in FUB_REVIEW_PERSON_PAYLOAD_KEYS:
+            continue
+        if key not in row:
+            row[key] = _review_cell(value)
+    return row
+
+
+def build_fub_review_table(
+    listings: list[dict],
+    *,
+    mapping: dict | None = None,
+    mapping_path: Path | None = None,
+    settings: dict | None = None,
+) -> tuple[list[tuple[str, str]], list[dict]]:
+    loaded = mapping if mapping is not None else load_mapping(mapping_path)
+    cfg = settings or fub_review_settings()
+    columns = fub_review_columns(loaded)
+    rows = [build_fub_review_row(item, loaded, cfg) for item in listings or []]
+    seen = {key for key, _header in columns}
+    extras: list[tuple[str, str]] = []
+    for item in rows:
+        for key in item:
+            if key not in seen:
+                extras.append((key, key))
+                seen.add(key)
+    if extras:
+        note_keys = {key for key, _header in FUB_REVIEW_NOTE_COLUMNS}
+        insert_at = next(
+            (i for i, (key, _) in enumerate(columns) if key in note_keys),
+            len(columns),
+        )
+        columns = columns[:insert_at] + extras + columns[insert_at:]
+    return columns, rows
 
 
 def _api_root(api_url: str) -> str:
@@ -2750,28 +4093,124 @@ def post_event(api_url: str, api_key: str, payload: dict, system: str) -> dict:
         return {}
 
 
+def _fub_payload_missing(payload) -> bool:
+    if payload is None:
+        return True
+    if not isinstance(payload, dict):
+        return False
+    err = str(payload.get("error") or payload.get("message") or "").lower()
+    if "not found" in err or "has been deleted" in err:
+        return True
+    person = payload.get("person") if isinstance(payload.get("person"), dict) else payload
+    if not isinstance(person, dict):
+        return False
+    if person.get("deleted") or person.get("isDeleted"):
+        return True
+    return str(person.get("status") or "").lower() == "deleted"
+
+
+def get_person(api_url: str, api_key: str, person_id: int, system: str) -> dict | None:
+    url = f"{_api_root(api_url)}/people/{int(person_id)}"
+    response = requests.get(
+        url,
+        auth=(api_key, ""),
+        headers=_fub_headers(system),
+        timeout=30,
+    )
+    if response.status_code in (404, 410):
+        return None
+    if response.status_code >= 400:
+        raise RuntimeError(f"FUB HTTP {response.status_code}: {response.text[:500]}")
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {}
+    if _fub_payload_missing(payload):
+        return None
+    return payload if isinstance(payload, dict) else {}
+
+
 def put_person(api_url: str, api_key: str, person_id: int, payload: dict, system: str) -> dict | None:
     body = _person_api_body(payload)
-    url = f"{_api_root(api_url)}/people/{int(person_id)}"
-    # mergeTags adds these tags beside tags already on the person.
-    # Omitting it replaces the person's whole tag list.
-    params = {"mergeTags": "true"} if body.get("tags") else None
+    url = f"{_api_root(api_url)}/people/{int(person_id)}?mergeTags=true"
     response = requests.put(
         url,
-        params=params,
         json=body,
         auth=(api_key, ""),
         headers=_fub_headers(system),
         timeout=30,
     )
-    if response.status_code == 404:
+    if response.status_code in (404, 410):
         return None
     if response.status_code >= 400:
         raise RuntimeError(f"FUB HTTP {response.status_code}: {response.text[:500]}")
     try:
-        return response.json()
+        parsed = response.json()
     except ValueError:
         return {}
+    if _fub_payload_missing(parsed):
+        return None
+    return parsed if isinstance(parsed, dict) else {}
+
+
+PROBATE_NOTE_MARKER = "[PPM-NOTE]"
+PROBATE_NOTE_SUBJECTS = frozenset(
+    {
+        "placer probate",
+        "sacramento probate",
+        "probate monitor",
+    }
+)
+COURT_NOTE_SUBJECTS = {
+    "de-111 petition": "de111",
+    "de-147 duties": "de147",
+    "ecourt public case": "court",
+}
+
+
+def probate_note_subject(row: dict | None = None) -> str:
+    if _row_source_id(row) == "sacramento":
+        return "Sacramento probate"
+    return "Placer probate"
+
+
+def _with_probate_note_marker(body: str) -> str:
+    text = (body or "").strip()
+    if not text:
+        return ""
+    if PROBATE_NOTE_MARKER in text:
+        return text
+    return f"{PROBATE_NOTE_MARKER}\n{text}"
+
+
+def _parse_fub_note_id(raw) -> int | None:
+    if raw in (None, "", 0, "0"):
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def is_probate_monitor_note(item: dict | None) -> bool:
+    if not isinstance(item, dict):
+        return False
+    body = str(item.get("body") or "")
+    if PROBATE_NOTE_MARKER in body:
+        return True
+    subject = str(item.get("subject") or "").strip().lower()
+    return subject in PROBATE_NOTE_SUBJECTS
+
+
+def note_integration_kind(item: dict | None) -> str | None:
+    """Return our note type, or None for CRM/human notes we must not touch."""
+    if not isinstance(item, dict):
+        return None
+    if is_probate_monitor_note(item):
+        return "probate"
+    subject = str(item.get("subject") or "").strip().lower()
+    return COURT_NOTE_SUBJECTS.get(subject)
 
 
 def post_note(
@@ -2807,6 +4246,639 @@ def post_note(
         return response.json()
     except ValueError:
         return {}
+
+
+def put_note(
+    api_url: str,
+    api_key: str,
+    note_id: int,
+    *,
+    person_id: int,
+    body: str,
+    subject: str,
+    system: str,
+    is_html: bool = False,
+) -> dict | None:
+    text = (body or "").strip()
+    if not text:
+        return {}
+    response = requests.put(
+        f"{_api_root(api_url)}/notes/{int(note_id)}",
+        json={
+            "personId": int(person_id),
+            "subject": subject or "Placer probate",
+            "body": text,
+            "isHtml": bool(is_html),
+        },
+        auth=(api_key, ""),
+        headers=_fub_headers(system),
+        timeout=30,
+    )
+    if response.status_code in (404, 410):
+        return None
+    if response.status_code >= 400:
+        raise RuntimeError(
+            f"FUB notes HTTP {response.status_code}: {response.text[:500]}"
+        )
+    try:
+        parsed = response.json()
+    except ValueError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def list_person_notes(
+    api_url: str,
+    api_key: str,
+    person_id: int,
+    system: str,
+    *,
+    limit: int = 100,
+) -> list[dict]:
+    response = requests.get(
+        f"{_api_root(api_url)}/notes",
+        params={"personId": int(person_id), "limit": int(limit)},
+        auth=(api_key, ""),
+        headers=_fub_headers(system),
+        timeout=30,
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(
+            f"FUB notes HTTP {response.status_code}: {response.text[:500]}"
+        )
+    try:
+        payload = response.json()
+    except ValueError:
+        return []
+    rows = payload.get("notes") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        return []
+    return [item for item in rows if isinstance(item, dict)]
+
+
+def find_probate_monitor_note(
+    notes: list[dict],
+    *,
+    preferred_id: int | None = None,
+) -> dict | None:
+    matches = [item for item in notes if is_probate_monitor_note(item)]
+    if not matches:
+        return None
+    if preferred_id is not None:
+        for item in matches:
+            if _parse_fub_note_id(item.get("id")) == int(preferred_id):
+                return item
+    matches.sort(key=lambda item: _parse_fub_note_id(item.get("id")) or 10**12)
+    return matches[0]
+
+
+def find_note_by_kind(notes: list[dict], kind: str) -> dict | None:
+    wanted = str(kind or "").strip().lower()
+    matches = [
+        item for item in notes if note_integration_kind(item) == wanted
+    ]
+    if not matches:
+        return None
+    matches.sort(key=lambda item: _parse_fub_note_id(item.get("id")) or 10**12)
+    return matches[0]
+
+
+def _prune_extra_kind_notes(
+    api_url: str,
+    api_key: str,
+    notes: list[dict],
+    *,
+    kind: str,
+    keep_id: int | None,
+    system: str,
+) -> None:
+    if keep_id is None:
+        return
+    wanted = str(kind or "").strip().lower()
+    for item in notes:
+        if note_integration_kind(item) != wanted:
+            continue
+        note_id = _parse_fub_note_id(item.get("id"))
+        if not note_id or int(note_id) == int(keep_id):
+            continue
+        try:
+            delete_note(api_url, api_key, int(note_id), system)
+            print(
+                f"FUB notes deleted extra {wanted} note_id={note_id}",
+                flush=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"FUB notes extra {wanted} delete failed note_id={note_id}: {exc}",
+                flush=True,
+            )
+
+
+def upsert_kind_note(
+    api_url: str,
+    api_key: str,
+    person_id: int,
+    body: str,
+    system: str,
+    *,
+    kind: str,
+    subject: str,
+    is_html: bool = False,
+) -> dict:
+    """Edit the existing DE-111 / DE-147 / court note in place; never POST a second one."""
+    text = (body or "").strip()
+    title = (subject or "").strip()
+    wanted = str(kind or "").strip().lower()
+    if not text or not wanted:
+        return {"ok": True, "action": "skipped", "id": None}
+    notes = list_person_notes(api_url, api_key, person_id, system)
+    existing = find_note_by_kind(notes, wanted)
+    note_id = _parse_fub_note_id((existing or {}).get("id"))
+    action = "created"
+    saved = None
+    if existing is not None and note_id:
+        old_body = _normalize_note_text(existing.get("body") or "")
+        old_subject = str(existing.get("subject") or "").strip()
+        if old_body == _normalize_note_text(text) and old_subject == title:
+            action = "unchanged"
+            saved = int(note_id)
+        else:
+            updated = put_note(
+                api_url,
+                api_key,
+                note_id,
+                person_id=person_id,
+                body=text,
+                subject=title,
+                system=system,
+                is_html=is_html,
+            )
+            if updated is None:
+                existing = None
+                note_id = None
+            else:
+                saved = _parse_fub_note_id(updated.get("id")) or note_id
+                action = "updated"
+    if saved is None:
+        created = post_note(
+            api_url,
+            api_key,
+            person_id,
+            text,
+            system,
+            subject=title,
+            is_html=is_html,
+        )
+        saved = _parse_fub_note_id(created.get("id"))
+        action = "created"
+    if saved:
+        _prune_extra_kind_notes(
+            api_url,
+            api_key,
+            notes,
+            kind=wanted,
+            keep_id=int(saved),
+            system=system,
+        )
+    return {"ok": True, "action": action, "id": saved}
+
+
+def upsert_probate_note(
+    api_url: str,
+    api_key: str,
+    person_id: int,
+    body: str,
+    system: str,
+    *,
+    subject: str | None = None,
+    cases: dict | None = None,
+    key: str | None = None,
+    is_html: bool = False,
+) -> dict:
+    """Edit the existing probate monitor note in place; never POST a second one."""
+    text = _with_probate_note_marker(body)
+    title = (subject or "Placer probate").strip() or "Placer probate"
+    if not text:
+        return {"ok": True, "action": "skipped", "id": None}
+    record = {}
+    if cases is not None and key:
+        record = cases.setdefault(key, {})
+    preferred_id = _parse_fub_note_id(record.get("fub_probate_note_id"))
+    notes = list_person_notes(api_url, api_key, person_id, system)
+    existing = find_probate_monitor_note(notes, preferred_id=preferred_id)
+    note_id = _parse_fub_note_id((existing or {}).get("id")) or preferred_id
+    if existing is not None and note_id:
+        old_body = str(existing.get("body") or "").strip()
+        old_subject = str(existing.get("subject") or "").strip()
+        if old_body == text and old_subject == title:
+            record["fub_probate_note_id"] = int(note_id)
+            _prune_extra_kind_notes(
+                api_url,
+                api_key,
+                notes,
+                kind="probate",
+                keep_id=int(note_id),
+                system=system,
+            )
+            return {"ok": True, "action": "unchanged", "id": int(note_id)}
+        updated = put_note(
+            api_url,
+            api_key,
+            note_id,
+            person_id=person_id,
+            body=text,
+            subject=title,
+            system=system,
+            is_html=is_html,
+        )
+        if updated is None:
+            existing = None
+            note_id = None
+        else:
+            saved = _parse_fub_note_id(updated.get("id")) or note_id
+            record["fub_probate_note_id"] = int(saved)
+            print(
+                f"FUB notes updated probate note {key or ''} "
+                f"person_id={person_id} note_id={saved}",
+                flush=True,
+            )
+            _prune_extra_kind_notes(
+                api_url,
+                api_key,
+                notes,
+                kind="probate",
+                keep_id=int(saved),
+                system=system,
+            )
+            return {"ok": True, "action": "updated", "id": int(saved)}
+    if existing is not None:
+        saved = _parse_fub_note_id(existing.get("id"))
+        if saved:
+            record["fub_probate_note_id"] = int(saved)
+            _prune_extra_kind_notes(
+                api_url,
+                api_key,
+                notes,
+                kind="probate",
+                keep_id=int(saved),
+                system=system,
+            )
+            return {"ok": True, "action": "unchanged", "id": int(saved)}
+    created = post_note(
+        api_url,
+        api_key,
+        person_id,
+        text,
+        system,
+        subject=title,
+        is_html=is_html,
+    )
+    saved = _parse_fub_note_id(created.get("id"))
+    if saved:
+        record["fub_probate_note_id"] = int(saved)
+        _prune_extra_kind_notes(
+            api_url,
+            api_key,
+            notes,
+            kind="probate",
+            keep_id=int(saved),
+            system=system,
+        )
+    print(
+        f"FUB notes posted probate note {key or ''} "
+        f"person_id={person_id} note_id={saved}",
+        flush=True,
+    )
+    return {"ok": True, "action": "created", "id": saved}
+
+
+def _normalize_note_text(text: str) -> str:
+    return "\n".join(
+        line.rstrip() for line in str(text or "").replace("\r\n", "\n").split("\n")
+    ).strip()
+
+
+def _note_body_key(text: str) -> str:
+    return " ".join(_normalize_note_text(text).split()).lower()
+
+
+def _note_paragraphs(text: str) -> list[str]:
+    chunks = []
+    for block in _normalize_note_text(text).split("\n\n"):
+        piece = " ".join(block.split()).strip()
+        if piece and piece != PROBATE_NOTE_MARKER:
+            chunks.append(piece)
+    return chunks
+
+
+def merge_probate_note_bodies(notes: list[dict]) -> tuple[str, str]:
+    """Keep the latest/longest probate body, appending unique extra paragraphs."""
+    ranked = [
+        item
+        for item in notes
+        if isinstance(item, dict) and _parse_fub_note_id(item.get("id"))
+    ]
+    ranked.sort(key=lambda item: _parse_fub_note_id(item.get("id")) or 0, reverse=True)
+    if not ranked:
+        return "Placer probate", ""
+    subject = str(ranked[0].get("subject") or "").strip() or "Placer probate"
+    bodies = [
+        _with_probate_note_marker(_normalize_note_text(item.get("body") or ""))
+        for item in ranked
+        if _normalize_note_text(item.get("body") or "")
+    ]
+    if not bodies:
+        return subject, ""
+    latest = bodies[0]
+    longest = max(bodies, key=len)
+    base = longest if len(longest) > len(latest) else latest
+    seen = {_note_body_key(para) for para in _note_paragraphs(base)}
+    extra: list[str] = []
+    for body in bodies:
+        for para in _note_paragraphs(body):
+            key = _note_body_key(para)
+            if key and key not in seen:
+                extra.append(para)
+                seen.add(key)
+    merged = base if not extra else f"{base}\n\n" + "\n\n".join(extra)
+    return subject, _with_probate_note_marker(merged)
+
+
+def plan_duplicate_note_cleanup(
+    notes: list[dict],
+    *,
+    preferred_probate_id: int | None = None,
+) -> dict:
+    """Plan deletes for our duplicate notes only. Human/CRM notes are skipped."""
+    rows = [item for item in notes if isinstance(item, dict)]
+    skipped_ids: list[int] = []
+    probate: list[dict] = []
+    court_groups: dict[tuple[str, str], list[dict]] = {}
+    for item in rows:
+        note_id = _parse_fub_note_id(item.get("id"))
+        kind = note_integration_kind(item)
+        if kind is None:
+            if note_id:
+                skipped_ids.append(int(note_id))
+            continue
+        if kind == "probate":
+            probate.append(item)
+            continue
+        body_key = _note_body_key(str(item.get("body") or ""))
+        court_groups.setdefault((kind, body_key), []).append(item)
+
+    delete_ids: list[int] = []
+    keep = find_probate_monitor_note(probate, preferred_id=preferred_probate_id)
+    keep_id = _parse_fub_note_id((keep or {}).get("id"))
+    put_subject = None
+    put_body = None
+    if probate and keep_id:
+        subject, merged = merge_probate_note_bodies(probate)
+        old_body = _normalize_note_text((keep or {}).get("body") or "")
+        old_subject = str((keep or {}).get("subject") or "").strip()
+        if merged and (
+            _normalize_note_text(merged) != old_body or subject != old_subject
+        ):
+            put_subject = subject
+            put_body = merged
+        for item in probate:
+            note_id = _parse_fub_note_id(item.get("id"))
+            if note_id and note_id != keep_id:
+                delete_ids.append(int(note_id))
+
+    court_exact_deletes: list[int] = []
+    for group in court_groups.values():
+        valid = [item for item in group if _parse_fub_note_id(item.get("id"))]
+        if len(valid) < 2:
+            continue
+        valid.sort(key=lambda item: _parse_fub_note_id(item.get("id")) or 0)
+        for item in valid[1:]:
+            note_id = _parse_fub_note_id(item.get("id"))
+            if note_id:
+                court_exact_deletes.append(int(note_id))
+                delete_ids.append(int(note_id))
+
+    # Stable unique order; never delete the keeper.
+    seen_del: set[int] = set()
+    unique_deletes: list[int] = []
+    for note_id in delete_ids:
+        if keep_id and note_id == keep_id:
+            continue
+        if note_id in seen_del:
+            continue
+        seen_del.add(note_id)
+        unique_deletes.append(note_id)
+
+    return {
+        "keep_id": int(keep_id) if keep_id else None,
+        "probate_ids": [
+            int(nid)
+            for nid in (_parse_fub_note_id(item.get("id")) for item in probate)
+            if nid
+        ],
+        "put_subject": put_subject,
+        "put_body": put_body,
+        "delete_ids": unique_deletes,
+        "court_exact_deletes": court_exact_deletes,
+        "skipped_ids": skipped_ids,
+        "notes_total": len(rows),
+        "probate_count": len(probate),
+        "would_change": bool(unique_deletes or put_body),
+    }
+
+
+def delete_note(
+    api_url: str,
+    api_key: str,
+    note_id: int,
+    system: str,
+) -> dict:
+    response = requests.delete(
+        f"{_api_root(api_url)}/notes/{int(note_id)}",
+        auth=(api_key, ""),
+        headers=_fub_headers(system),
+        timeout=30,
+    )
+    if response.status_code in (404, 410):
+        return {"ok": True, "action": "missing", "id": int(note_id)}
+    if response.status_code >= 400:
+        raise RuntimeError(
+            f"FUB notes HTTP {response.status_code}: {response.text[:500]}"
+        )
+    return {"ok": True, "action": "deleted", "id": int(note_id)}
+
+
+def listing_fub_people(listings: list[dict]) -> list[dict]:
+    seen: set[int] = set()
+    people: list[dict] = []
+    for row in listings:
+        if not isinstance(row, dict):
+            continue
+        if row.get("fub_removed"):
+            continue
+        person_id = _parse_fub_person_id(row.get("fub_person_id"))
+        if not person_id or person_id in seen:
+            continue
+        seen.add(int(person_id))
+        people.append(
+            {
+                "person_id": int(person_id),
+                "case_number": str(row.get("case_number") or ""),
+                "source_id": str(row.get("source_id") or ""),
+            }
+        )
+    return people
+
+
+def cleanup_person_duplicate_notes(
+    api_url: str,
+    api_key: str,
+    person_id: int,
+    system: str,
+    *,
+    dry_run: bool = True,
+    preferred_probate_id: int | None = None,
+    cases: dict | None = None,
+    key: str | None = None,
+) -> dict:
+    """Keep one probate-monitor note; delete only extra notes we created."""
+    notes = list_person_notes(api_url, api_key, int(person_id), system)
+    plan = plan_duplicate_note_cleanup(
+        notes, preferred_probate_id=preferred_probate_id
+    )
+    result = {
+        "ok": True,
+        "person_id": int(person_id),
+        "dry_run": bool(dry_run),
+        "notes_total": plan["notes_total"],
+        "probate_count": plan["probate_count"],
+        "keep_id": plan["keep_id"],
+        "delete_ids": list(plan["delete_ids"]),
+        "court_exact_deletes": list(plan["court_exact_deletes"]),
+        "skipped_other": len(plan["skipped_ids"]),
+        "put": bool(plan["put_body"]),
+        "would_change": plan["would_change"],
+        "deleted": [],
+        "action": "dry_run" if dry_run else "unchanged",
+    }
+    if dry_run:
+        return result
+    record = {}
+    if cases is not None and key:
+        record = cases.setdefault(key, {})
+    keep_id = plan["keep_id"]
+    if plan["put_body"] and keep_id:
+        updated = put_note(
+            api_url,
+            api_key,
+            keep_id,
+            person_id=int(person_id),
+            body=plan["put_body"],
+            subject=plan["put_subject"] or "Placer probate",
+            system=system,
+        )
+        if updated is None:
+            result["ok"] = False
+            result["action"] = "keep_missing"
+            return result
+        keep_id = _parse_fub_note_id(updated.get("id")) or keep_id
+        result["keep_id"] = int(keep_id)
+        result["put"] = True
+    deleted: list[int] = []
+    for note_id in plan["delete_ids"]:
+        delete_note(api_url, api_key, note_id, system)
+        deleted.append(int(note_id))
+    if keep_id:
+        record["fub_probate_note_id"] = int(keep_id)
+    result["deleted"] = deleted
+    if deleted or result["put"]:
+        result["action"] = "cleaned"
+        print(
+            f"FUB notes cleaned person_id={person_id} keep={keep_id} "
+            f"deleted={len(deleted)}",
+            flush=True,
+        )
+    return result
+
+
+def cleanup_listing_duplicate_notes(
+    listings: list[dict],
+    *,
+    api_url: str,
+    api_key: str,
+    system: str,
+    dry_run: bool = True,
+    person_id: int | None = None,
+    skip_person_ids: list[int] | tuple[int, ...] | None = None,
+    cases: dict | None = None,
+) -> dict:
+    """Scan listing FUB people. Live deletes require a single person_id."""
+    skip = {
+        int(item)
+        for item in (skip_person_ids or [])
+        if _parse_fub_person_id(item)
+    }
+    wanted = _parse_fub_person_id(person_id)
+    if not dry_run and not wanted:
+        raise ValueError("Live FUB note cleanup requires a single person_id.")
+    people = listing_fub_people(listings)
+    if wanted:
+        people = [item for item in people if item["person_id"] == int(wanted)]
+        if not people:
+            people = [
+                {
+                    "person_id": int(wanted),
+                    "case_number": "",
+                    "source_id": "",
+                }
+            ]
+    people = [item for item in people if item["person_id"] not in skip]
+    rows: list[dict] = []
+    dup_people = 0
+    extra_notes = 0
+    for item in people:
+        pid = int(item["person_id"])
+        preferred = None
+        if cases is not None:
+            record = cases.get(item.get("case_number") or "") or {}
+            preferred = _parse_fub_note_id(record.get("fub_probate_note_id"))
+        cleaned = cleanup_person_duplicate_notes(
+            api_url,
+            api_key,
+            pid,
+            system,
+            dry_run=dry_run,
+            preferred_probate_id=preferred,
+            cases=cases,
+            key=item.get("case_number") or None,
+        )
+        extras = max(0, int(cleaned.get("probate_count") or 0) - 1) + len(
+            cleaned.get("court_exact_deletes") or []
+        )
+        if extras:
+            dup_people += 1
+            extra_notes += extras
+        rows.append(
+            {
+                "person_id": pid,
+                "case_number": item.get("case_number"),
+                "probate_count": cleaned.get("probate_count"),
+                "keep_id": cleaned.get("keep_id"),
+                "delete_count": len(cleaned.get("delete_ids") or []),
+                "skipped_other": cleaned.get("skipped_other"),
+                "would_change": cleaned.get("would_change"),
+                "action": cleaned.get("action"),
+            }
+        )
+    return {
+        "ok": True,
+        "dry_run": bool(dry_run),
+        "people": len(people),
+        "people_with_duplicate_notes": dup_people,
+        "extra_notes": extra_notes,
+        "skipped_person_ids": sorted(skip),
+        "rows": rows,
+    }
 
 
 def _attachment_headers(system: str) -> dict:
@@ -2927,22 +4999,27 @@ def attach_de111_file(
         note_result = {"ok": True, "reason": "notes_link", "file": file_name, "uri": uri}
     else:
         body, is_html = _de111_note_payload(case, file_name, uri, path)
-        post_note(
+        saved = upsert_kind_note(
             api_url,
             api_key,
             person_id,
             body,
             system,
+            kind="de111",
             subject="DE-111 petition",
             is_html=is_html,
         )
         cases[key]["fub_de111_note"] = True
         cases[key]["fub_de111_note_uri"] = uri
-        print(f"FUB notes posted DE-111 link {key} person_id={person_id}", flush=True)
+        print(
+            f"FUB notes {saved.get('action')} DE-111 link {key} "
+            f"person_id={person_id} note_id={saved.get('id')}",
+            flush=True,
+        )
         note_result = {"ok": True, "reason": "notes_link", "file": file_name, "uri": uri}
     if not str(os.environ.get("FUB_SYSTEM_KEY") or "").strip():
         return note_result
-    if record.get("fub_attachment_id") and not force:
+    if record.get("fub_attachment_id"):
         note_result["id"] = record.get("fub_attachment_id")
         return note_result
     try:
@@ -3032,17 +5109,22 @@ def attach_de147_file(
     if record.get("fub_de147_note_fp") == fingerprint and not force:
         return {"ok": True, "reason": "already", "uri": uri or court_url, "file": file_name}
     body, is_html = _de147_note_payload(case, file_name, uri, court_url, phone)
-    post_note(
+    saved = upsert_kind_note(
         api_url,
         api_key,
         person_id,
         body,
         system,
+        kind="de147",
         subject="DE-147 duties",
         is_html=is_html,
     )
     cases[key]["fub_de147_note_fp"] = fingerprint
-    print(f"FUB notes posted DE-147 {key} person_id={person_id} {uri or court_url}", flush=True)
+    print(
+        f"FUB notes {saved.get('action')} DE-147 {key} person_id={person_id} "
+        f"note_id={saved.get('id')} {uri or court_url}",
+        flush=True,
+    )
     return {"ok": True, "reason": "notes_link", "uri": uri or court_url, "file": file_name}
 
 
@@ -3082,17 +5164,22 @@ def post_court_portal_note(
     if record.get("fub_court_note_url") == url and not force:
         print(f"FUB court URL already noted {key}: {url}", flush=True)
         return {"ok": True, "reason": "already", "uri": url}
-    post_note(
+    saved = upsert_kind_note(
         api_url,
         api_key,
         person_id,
         _court_portal_note_payload(case_key(row), url),
         system,
+        kind="court",
         subject="eCourt Public case",
         is_html=True,
     )
     cases[key]["fub_court_note_url"] = url
-    print(f"FUB notes posted court URL {key} person_id={person_id} {url}", flush=True)
+    print(
+        f"FUB notes {saved.get('action')} court URL {key} "
+        f"person_id={person_id} note_id={saved.get('id')} {url}",
+        flush=True,
+    )
     return {"ok": True, "reason": "notes_link", "uri": url}
 
 
@@ -3116,6 +5203,22 @@ def _remember_person(cases: dict, key: str, person_id: int, fingerprint: str) ->
     cases[key]["fub_person_id"] = int(person_id)
     cases[key]["fub_fingerprint"] = fingerprint
     cases[key]["fub_skip"] = None
+    cases[key].pop("fub_removed", None)
+
+
+def _mark_fub_removed(cases: dict, key: str, person_id: int | None) -> None:
+    if not key:
+        return
+    record = cases.setdefault(key, {})
+    if person_id not in (None, "", 0, "0"):
+        record["fub_person_id"] = int(person_id)
+    record["fub_removed"] = True
+    record["fub_skip"] = "fub_removed"
+    print(
+        f"FUB person_id={person_id} was deleted; "
+        f"marking {key} as fub_removed (will not recreate)",
+        flush=True,
+    )
 
 
 def _clear_fub_person(cases: dict, key: str) -> None:
@@ -3130,7 +5233,9 @@ def _clear_fub_person(cases: dict, key: str) -> None:
         "fub_de111_note_uri",
         "fub_de147_note_fp",
         "fub_court_note_url",
+        "fub_probate_note_id",
         "fub_skip",
+        "fub_removed",
     ):
         record.pop(field, None)
 
@@ -3140,6 +5245,7 @@ def export_new_leads(
     state: dict,
     *,
     mapping_path: Path | None = None,
+    force: bool = False,
 ) -> dict:
     summary = {
         "posted": 0,
@@ -3170,22 +5276,18 @@ def export_new_leads(
         print(summary["error"], flush=True)
         print("FUB: posted=0 updated=0 skipped=0", flush=True)
         return summary
-    mapping = load_mapping(mapping_path)
-    source_id = _datasources().county_key(os.environ.get("PROBATE_COUNTY"))
-    source_fields = custom_fields_for_source(mapping, source_id)
-    if source_id != "placer" and source_fields:
-        mapping = dict(mapping)
-        mapping["custom_fields"] = source_fields
+    source_id = _row_source_id(rows[0] if rows else None)
+    mapping = mapping_for_export(load_mapping(mapping_path), source_id)
     settings = {
         "api_url": os.environ.get("FUB_API_URL", "https://api.followupboss.com/v1"),
-        "source": os.environ.get("FUB_SOURCE", "probate"),
+        "source": mapping.get("lead_source") or os.environ.get("FUB_SOURCE", "probate"),
         "assigned_to": os.environ.get("FUB_ASSIGNED_TO", "Blake Hammond"),
         "stage": (os.environ.get("FUB_STAGE") or "").strip(),
         "event_type": os.environ.get("FUB_EVENT_TYPE", "Seller Inquiry"),
     }
     strict = _env_bool("FUB_STRICT_PROPERTY")
     verify = _env_bool("FUB_VERIFY_ONLY")
-    update_existing = _env_bool("FUB_UPDATE_EXISTING")
+    update_existing = bool(force) or _env_bool("FUB_UPDATE_EXISTING")
     refresh = verify or update_existing
     forced_id = _forced_verify_person_id() if verify else None
     if verify and _env_bool("FUB_VERIFY_EXISTING") and forced_id is None:
@@ -3198,12 +5300,46 @@ def export_new_leads(
     cases = state.setdefault("cases", {})
     posted_case = None
     posted_pid = None
-    work_rows = list(rows) if forced_id else _rows_for_export(rows, state, verify=verify)
+    work_rows = _rows_for_export(rows, state, verify=verify)
     if forced_id:
-        print(f"FUB verify: updating existing person_id={forced_id}", flush=True)
+        matched = []
+        for row in rows:
+            harvest = listing_as_harvest_row(row)
+            stored = stored_person_id(state, case_key(harvest), harvest)
+            listed = _parse_fub_person_id(harvest.get("fub_person_id"))
+            if stored == forced_id or listed == forced_id:
+                matched.append(harvest)
+        if not matched:
+            summary["error"] = (
+                f"No stored listing has Follow Up Boss person {forced_id}."
+            )
+            summary["verify_note"] = summary["error"]
+            print(summary["error"], flush=True)
+            print("FUB: posted=0 updated=0 skipped=0", flush=True)
+            return summary
+        work_rows = matched
+        print(
+            f"FUB verify: stored listing {case_key(matched[0])} "
+            f"person_id={forced_id}",
+            flush=True,
+        )
     for row in work_rows:
         key = case_key(row)
-        existing_id = stored_person_id(state, key) if key else None
+        if is_fub_removed(state, key, row):
+            if key:
+                record = cases.setdefault(key, {})
+                record["fub_removed"] = True
+                record["fub_skip"] = "fub_removed"
+            summary["skipped"] += 1
+            summary["skips"].append({"case": key, "reason": "fub_removed"})
+            print(f"FUB skip {key or '(no case)'}: fub_removed")
+            _progress_fub(summary, "fub_removed", key)
+            continue
+        existing_id = (
+            None
+            if needs_fub_create(state, key, row)
+            else stored_person_id(state, key, row)
+        )
         if forced_id is not None:
             existing_id = forced_id
         reason = gate_reason(
@@ -3212,13 +5348,14 @@ def export_new_leads(
             mapping,
             strict_property=strict,
             existing_id=existing_id,
-            allow_seen_without_fub=verify,
         )
         if reason:
             summary["skipped"] += 1
             summary["skips"].append({"case": key, "reason": reason})
             if key and key in cases:
                 cases[key]["fub_skip"] = reason
+                if reason != "fub_removed" and stored_person_id(state, key) is None:
+                    cases[key].pop("fub_person_id", None)
             print(f"FUB skip {key or '(no case)'}: {reason}")
             _progress_fub(summary, "skipped", key)
             continue
@@ -3233,13 +5370,30 @@ def export_new_leads(
         record = cases.get(key) or {}
         try:
             if existing_id is not None:
-                if verify and (summary["posted"] >= 1 or summary["updated"] >= 1):
+                if _one_person_verify_run(
+                    verify=verify, update_existing=update_existing
+                ) and (summary["posted"] >= 1 or summary["updated"] >= 1):
                     summary["skipped"] += 1
                     summary["skips"].append({"case": key, "reason": "verify_only_limit"})
                     print(f"FUB skip {key}: verify_only_limit")
                     _progress_fub(summary, "verify-only skip", key)
                     continue
-                if not verify and not update_existing and record.get("fub_fingerprint") == fingerprint:
+                live = get_person(
+                    settings["api_url"], api_key, existing_id, system
+                )
+                if live is None:
+                    _mark_fub_removed(cases, key, existing_id)
+                    summary["skipped"] += 1
+                    summary["skips"].append({"case": key, "reason": "fub_removed"})
+                    _progress_fub(summary, "fub_removed", key)
+                    continue
+                if should_skip_unchanged_person(
+                    existing_id=existing_id,
+                    record=record,
+                    fingerprint=fingerprint,
+                    verify=verify,
+                    update_existing=update_existing,
+                ):
                     summary["skipped"] += 1
                     summary["skips"].append({"case": key, "reason": "unchanged"})
                     print(f"FUB skip {key}: unchanged person_id={existing_id}")
@@ -3257,20 +5411,11 @@ def export_new_leads(
                     settings["api_url"], api_key, existing_id, person, system
                 )
                 if body is None:
-                    print(
-                        f"FUB person_id={existing_id} was deleted; "
-                        f"creating a new person for {key}",
-                        flush=True,
-                    )
-                    _clear_fub_person(cases, key)
-                    existing_id = None
-                    person = build_person(
-                        row,
-                        mapping,
-                        settings,
-                        person_id=None,
-                        allowed_custom=allowed_custom,
-                    )
+                    _mark_fub_removed(cases, key, existing_id)
+                    summary["skipped"] += 1
+                    summary["skips"].append({"case": key, "reason": "fub_removed"})
+                    _progress_fub(summary, "fub_removed", key)
+                    continue
                 else:
                     pid = person_id_from_response(body) or existing_id
                     _remember_person(cases, key, pid, fingerprint)
@@ -3284,19 +5429,21 @@ def export_new_leads(
                     summary["verify_record"] = record_view
                     print(f"FUB updated {key} person_id={pid}")
                     _progress_fub(summary, "updated", key)
-                    if refresh:
-                        if verify:
-                            state["last_fub_verify_case"] = key
-                        try:
-                            post_note(
-                                settings["api_url"],
-                                api_key,
-                                pid,
-                                combined_notes(row, mapping),
-                                system,
-                            )
-                        except Exception as note_exc:  # noqa: BLE001
-                            print(f"FUB notes error {key}: {note_exc}", flush=True)
+                    if verify:
+                        state["last_fub_verify_case"] = key
+                    try:
+                        upsert_probate_note(
+                            settings["api_url"],
+                            api_key,
+                            pid,
+                            combined_notes(row, mapping),
+                            system,
+                            subject=probate_note_subject(row),
+                            cases=cases,
+                            key=key,
+                        )
+                    except Exception as note_exc:  # noqa: BLE001
+                        print(f"FUB notes error {key}: {note_exc}", flush=True)
                     try:
                         court_note = post_court_portal_note(
                             row,
@@ -3352,10 +5499,14 @@ def export_new_leads(
                         record_view["de147_attach"] = {"ok": False, "reason": str(duties_exc)[:300]}
                         summary["verify_record"] = record_view
                         print(f"FUB DE-147 notes error {key}: {duties_exc}", flush=True)
-                    if verify:
+                    if _one_person_verify_run(
+                        verify=verify, update_existing=update_existing
+                    ):
                         break
                     continue
-            if verify and (summary["posted"] >= 1 or summary["updated"] >= 1):
+            if _one_person_verify_run(
+                verify=verify, update_existing=update_existing
+            ) and (summary["posted"] >= 1 or summary["updated"] >= 1):
                 summary["skipped"] += 1
                 summary["skips"].append({"case": key, "reason": "verify_only_limit"})
                 print(f"FUB skip {key}: verify_only_limit")
@@ -3392,12 +5543,15 @@ def export_new_leads(
             except Exception as put_exc:  # noqa: BLE001
                 print(f"FUB create-sync PUT error {key}: {put_exc}", flush=True)
             try:
-                post_note(
+                upsert_probate_note(
                     settings["api_url"],
                     api_key,
                     pid,
                     combined_notes(row, mapping),
                     system,
+                    subject=probate_note_subject(row),
+                    cases=cases,
+                    key=key,
                 )
             except Exception as note_exc:  # noqa: BLE001
                 print(f"FUB notes error {key}: {note_exc}", flush=True)
@@ -3463,7 +5617,10 @@ def export_new_leads(
             _progress_fub(summary, "posted", key)
             if verify:
                 state["last_fub_verify_case"] = key
-                break
+                if _one_person_verify_run(
+                    verify=verify, update_existing=update_existing
+                ):
+                    break
         except Exception as exc:  # noqa: BLE001
             summary["skipped"] += 1
             err = str(exc)
@@ -3475,7 +5632,7 @@ def export_new_leads(
                 summary["verify_record"]["posted"] = False
                 summary["verify_record"]["fub_error"] = err[:500]
             print(f"FUB error {key}: {err}", flush=True)
-            break
+            continue
     summary["verify_case"] = posted_case
     summary["verify_person_id"] = posted_pid
     if verify:
@@ -3503,6 +5660,12 @@ def export_new_leads(
                     note = f"{note}. Skips: {sample}"
             summary["verify_note"] = note
             print(f"FUB verify: {note}", flush=True)
+    mapping_dir = mapping_path
+    if mapping_dir is None:
+        raw = str(os.environ.get("FUB_MAPPING_PATH") or "").strip()
+        mapping_dir = Path(raw) if raw else None
+    if mapping_dir:
+        persist_fub_removed_on_listings(Path(mapping_dir).resolve().parent, cases)
     print(
         f"FUB: posted={summary['posted']} updated={summary['updated']} "
         f"skipped={summary['skipped']}",

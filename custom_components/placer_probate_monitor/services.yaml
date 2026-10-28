@@ -6,7 +6,44 @@ test_email:
   description: Send a test message with the configured SMTP settings and recipients.
 verify_fub:
   name: Verify one FUB import
-  description: Scrape as usual, then import only the first go-case that has never been sent to Follow Up Boss. Does not email.
+  description: Re-parse stored PDFs, then import only the first go-case that has never been sent to Follow Up Boss. Does not query Placer or Sacramento sources or email.
 preview_one:
   name: Preview one record
-  description: Retrieve one live go-case for display only. Ignores local seen/FUB status. Does not post to Follow Up Boss or update seen-cases.
+  description: Preview one stored go-case for display only. Uses PDFs already on this Home Assistant box. Ignores local seen/FUB status. Does not query Placer or Sacramento sources, post to Follow Up Boss, or update seen-cases.
+rescan_local:
+  name: Rescan local files
+  description: Re-parse on-disk DE-111/DE-147 PDFs for enabled counties. Does not search CNPA or contact court portals. Follow Up Boss export still runs if enabled.
+test_stored:
+  name: Test stored data
+  description: Parse every on-disk DE-111/DE-147 already on this Home Assistant box and score the current Go checklist. Does not search CNPA, contact court portals, email, or post to Follow Up Boss.
+rescan_go:
+  name: Rescan GO/NO-GO
+  description: Re-evaluate GO/NO-GO from stored listings and PDFs, then stamp go_status and nogo_reason. Does not create or update Follow Up Boss people.
+cleanup_fub_notes:
+  name: Clean duplicate FUB probate notes
+  description: List notes on listing people and keep one probate-monitor note per person. Default is dry-run. Live delete requires person_id and apply true. Never deletes CRM notes without our [PPM-NOTE] marker or known probate/court subjects.
+  fields:
+    dry_run:
+      name: Dry run
+      description: Count duplicates without deleting. Defaults to true.
+      example: true
+      selector:
+        boolean:
+    apply:
+      name: Apply
+      description: Actually PUT the kept note and DELETE extras. Requires person_id. Defaults to false.
+      example: false
+      selector:
+        boolean:
+    person_id:
+      name: Follow Up Boss person ID
+      description: Required for a live cleanup. Leave blank to dry-run every listing person.
+      example: "5172"
+      selector:
+        text:
+    skip_person_ids:
+      name: Skip person IDs
+      description: Optional comma-separated FUB person IDs to leave untouched.
+      example: "5171"
+      selector:
+        text:

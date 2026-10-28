@@ -9,6 +9,12 @@ subject_address_type: "subject property"
 # Names skipped even if they pass the hard gate (case-insensitive substring).
 skip_petitioner_contains:
   - public administrator
+  - public guardian
+  - professional fiduciary
+  - fiduciary services
+  - fiduciary bureau
+  - corporate trustee
+  - trust company
 
 # Custom field API names (create these in FUB, then keep names in sync).
 custom_fields:

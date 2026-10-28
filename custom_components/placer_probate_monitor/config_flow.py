@@ -19,6 +19,7 @@ from .const import (
     CONF_FUB_STAGE,
     CONF_FUB_ENABLED,
     CONF_FUB_EVENT_TYPE,
+    CONF_FUB_GO_REQUIRED_FIELDS,
     CONF_FUB_SOURCE,
     CONF_FUB_STRICT_PROPERTY,
     CONF_FUB_VERIFY_ONLY,
@@ -33,6 +34,12 @@ from .const import (
     CONF_RECIPIENTS,
     CONF_RUN_ON_START,
     CONF_RUN_TIME,
+    CONF_SACRAMENTO_ECOURT_PAUSE,
+    CONF_PUBLIC_REPORTS_LOOKBACK_DAYS,
+    CONF_SACRAMENTO_LOOKAHEAD_DAYS,
+    CONF_SACRAMENTO_LOOKBACK_DAYS,
+    CONF_SACRAMENTO_PORTAL_PASSWORD,
+    CONF_SACRAMENTO_PORTAL_USER,
     CONF_SEND_EMAIL,
     CONF_SKIP_PORTAL,
     CONF_SMTP_HOST,
@@ -41,8 +48,11 @@ from .const import (
     CONF_SMTP_USER,
     CONF_TIMEZONE,
     CONF_WEEKLY_DAY,
+    DEFAULT_FUB_GO_REQUIRED_FIELDS,
     DEFAULTS,
     DOMAIN,
+    FUB_GO_GATE_FIELD_KEYS,
+    FUB_GO_GATE_FIELDS,
     FREQUENCIES,
     FUB_EVENT_TYPES,
     WEEKDAYS,
@@ -121,7 +131,7 @@ def _search_schema(defaults: dict) -> vol.Schema:
                 CONF_LOOKBACK_DAYS, default=int(defaults.get(CONF_LOOKBACK_DAYS, 21))
             ): selector.NumberSelector(
                 selector.NumberSelectorConfig(
-                    min=1, max=120, mode=selector.NumberSelectorMode.BOX
+                    min=1, max=365, mode=selector.NumberSelectorMode.BOX
                 )
             ),
             vol.Required(
@@ -162,6 +172,67 @@ def _search_schema(defaults: dict) -> vol.Schema:
     )
 
 
+def _sacramento_schema(defaults: dict) -> vol.Schema:
+    return vol.Schema(
+        {
+            vol.Required(
+                CONF_SACRAMENTO_LOOKBACK_DAYS,
+                default=int(defaults.get(CONF_SACRAMENTO_LOOKBACK_DAYS, 60)),
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=1, max=365, mode=selector.NumberSelectorMode.BOX
+                )
+            ),
+            vol.Required(
+                CONF_SACRAMENTO_LOOKAHEAD_DAYS,
+                default=int(defaults.get(CONF_SACRAMENTO_LOOKAHEAD_DAYS, 0)),
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=0, max=120, mode=selector.NumberSelectorMode.BOX
+                )
+            ),
+            vol.Required(
+                CONF_PUBLIC_REPORTS_LOOKBACK_DAYS,
+                default=int(defaults.get(CONF_PUBLIC_REPORTS_LOOKBACK_DAYS, 2)),
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=1, max=365, mode=selector.NumberSelectorMode.BOX
+                )
+            ),
+            vol.Required(
+                CONF_SACRAMENTO_ECOURT_PAUSE,
+                default=float(defaults.get(CONF_SACRAMENTO_ECOURT_PAUSE, 1.2)),
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=0.5, max=10, step=0.1, mode=selector.NumberSelectorMode.BOX
+                )
+            ),
+            vol.Optional(
+                CONF_SACRAMENTO_PORTAL_USER,
+                default=defaults.get(CONF_SACRAMENTO_PORTAL_USER, ""),
+            ): selector.TextSelector(
+                selector.TextSelectorConfig(type=selector.TextSelectorType.EMAIL)
+            ),
+            vol.Optional(
+                CONF_SACRAMENTO_PORTAL_PASSWORD, default=""
+            ): selector.TextSelector(
+                selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
+            ),
+        }
+    )
+
+
+def _go_required_default(defaults: dict) -> list[str]:
+    stored = defaults.get(CONF_FUB_GO_REQUIRED_FIELDS)
+    allowed = {str(key) for key in FUB_GO_GATE_FIELD_KEYS}
+    if stored is not None:
+        return [key for key in FUB_GO_GATE_FIELD_KEYS if key in {str(item) for item in stored} and key in allowed]
+    fields = [key for key in DEFAULT_FUB_GO_REQUIRED_FIELDS if key in allowed]
+    if defaults.get(CONF_FUB_STRICT_PROPERTY) and "decedent_residence" not in fields:
+        fields.append("decedent_residence")
+    return fields
+
+
 def _fub_schema(defaults: dict) -> vol.Schema:
     return vol.Schema(
         {
@@ -197,10 +268,19 @@ def _fub_schema(defaults: dict) -> vol.Schema:
                     mode=selector.SelectSelectorMode.DROPDOWN,
                 )
             ),
-            vol.Required(
-                CONF_FUB_STRICT_PROPERTY,
-                default=bool(defaults.get(CONF_FUB_STRICT_PROPERTY, False)),
-            ): selector.BooleanSelector(),
+            vol.Optional(
+                CONF_FUB_GO_REQUIRED_FIELDS,
+                default=_go_required_default(defaults),
+            ): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[
+                        {"value": item["key"], "label": item["label"]}
+                        for item in FUB_GO_GATE_FIELDS
+                    ],
+                    multiple=True,
+                    mode=selector.SelectSelectorMode.LIST,
+                )
+            ),
             vol.Required(
                 CONF_FUB_VERIFY_ONLY,
                 default=bool(defaults.get(CONF_FUB_VERIFY_ONLY, True)),
@@ -220,17 +300,35 @@ def _normalize(user_input: dict[str, Any], previous: dict | None = None) -> dict
         data[CONF_SMTP_PASSWORD] = previous.get(CONF_SMTP_PASSWORD, "")
     if not data.get(CONF_FUB_API_KEY) and previous:
         data[CONF_FUB_API_KEY] = previous.get(CONF_FUB_API_KEY, "")
+    if not data.get(CONF_SACRAMENTO_PORTAL_PASSWORD) and previous:
+        data[CONF_SACRAMENTO_PORTAL_PASSWORD] = previous.get(
+            CONF_SACRAMENTO_PORTAL_PASSWORD, ""
+        )
     for key in (
         CONF_SMTP_PORT,
         CONF_LOOKBACK_DAYS,
         CONF_LOOKAHEAD_DAYS,
         CONF_MONTHLY_DAY,
         CONF_MAX_PAGES,
+        CONF_SACRAMENTO_LOOKBACK_DAYS,
+        CONF_SACRAMENTO_LOOKAHEAD_DAYS,
+        CONF_PUBLIC_REPORTS_LOOKBACK_DAYS,
     ):
         if key in data:
             data[key] = int(data[key])
     if CONF_ECOURT_PAUSE in data:
         data[CONF_ECOURT_PAUSE] = float(data[CONF_ECOURT_PAUSE])
+    if CONF_SACRAMENTO_ECOURT_PAUSE in data:
+        data[CONF_SACRAMENTO_ECOURT_PAUSE] = float(data[CONF_SACRAMENTO_ECOURT_PAUSE])
+    if CONF_FUB_GO_REQUIRED_FIELDS in data:
+        from .fub_client import normalize_fub_go_required_fields
+
+        data[CONF_FUB_GO_REQUIRED_FIELDS] = normalize_fub_go_required_fields(
+            data.get(CONF_FUB_GO_REQUIRED_FIELDS)
+        )
+        data[CONF_FUB_STRICT_PROPERTY] = (
+            "decedent_residence" in data[CONF_FUB_GO_REQUIRED_FIELDS]
+        )
     return data
 
 
@@ -251,8 +349,16 @@ class PlacerProbateMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_search(self, user_input: dict[str, Any] | None = None):
         if user_input is not None:
             self._data = _normalize(user_input, self._data)
-            return await self.async_step_fub()
+            return await self.async_step_sacramento()
         return self.async_show_form(step_id="search", data_schema=_search_schema(self._data))
+
+    async def async_step_sacramento(self, user_input: dict[str, Any] | None = None):
+        if user_input is not None:
+            self._data = _normalize(user_input, self._data)
+            return await self.async_step_fub()
+        return self.async_show_form(
+            step_id="sacramento", data_schema=_sacramento_schema(self._data)
+        )
 
     async def async_step_fub(self, user_input: dict[str, Any] | None = None):
         if user_input is not None:
@@ -294,8 +400,17 @@ class PlacerProbateMonitorOptionsFlow(config_entries.OptionsFlow):
         defaults = self._defaults()
         if user_input is not None:
             self._data = _normalize(user_input, defaults)
-            return await self.async_step_fub()
+            return await self.async_step_sacramento()
         return self.async_show_form(step_id="search", data_schema=_search_schema(defaults))
+
+    async def async_step_sacramento(self, user_input: dict[str, Any] | None = None):
+        defaults = self._defaults()
+        if user_input is not None:
+            self._data = _normalize(user_input, defaults)
+            return await self.async_step_fub()
+        return self.async_show_form(
+            step_id="sacramento", data_schema=_sacramento_schema(defaults)
+        )
 
     async def async_step_fub(self, user_input: dict[str, Any] | None = None):
         defaults = self._defaults()

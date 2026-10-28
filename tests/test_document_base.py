@@ -13,7 +13,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "custom_components" / "placer_probate_monitor"))
+# Root copies own the shared Nabu Casa helpers. The installed 1.3.155
+# component is a different tree and is exercised by its own regression test.
+sys.path.insert(0, str(ROOT))
 
 from document_base import (  # noqa: E402
     apply_document_base,

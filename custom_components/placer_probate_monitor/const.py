@@ -32,10 +32,24 @@ CONF_FUB_ASSIGNED_TO = "fub_assigned_to"
 CONF_FUB_STAGE = "fub_stage"
 CONF_FUB_EVENT_TYPE = "fub_event_type"
 CONF_FUB_STRICT_PROPERTY = "fub_strict_property"
+CONF_FUB_GO_REQUIRED_FIELDS = "fub_go_required_fields"
 CONF_FUB_VERIFY_ONLY = "fub_verify_only"
 CONF_FUB_UPDATE_EXISTING = "fub_update_existing"
 CONF_FUB_VERIFY_EXISTING = "fub_verify_existing"
 CONF_FUB_VERIFY_PERSON_ID = "fub_verify_person_id"
+CONF_SOURCE_ENABLED = "source_enabled"
+CONF_SACRAMENTO_PORTAL_USER = "sacramento_portal_user"
+CONF_SACRAMENTO_PORTAL_PASSWORD = "sacramento_portal_password"
+CONF_SACRAMENTO_LOOKBACK_DAYS = "sacramento_lookback_days"
+CONF_SACRAMENTO_LOOKAHEAD_DAYS = "sacramento_lookahead_days"
+CONF_PUBLIC_REPORTS_LOOKBACK_DAYS = "public_reports_lookback_days"
+CONF_SACRAMENTO_ECOURT_PAUSE = "sacramento_ecourt_pause_seconds"
+CONF_AUDIT_WEEKLY = "audit_weekly"
+
+FUB_LEAD_SOURCE_BY_COUNTY = {
+    "placer": "probate",
+    "sacramento": "probate",
+}
 
 FUB_EVENT_TYPES = [
     "Seller Inquiry",
@@ -43,6 +57,20 @@ FUB_EVENT_TYPES = [
     "Property Inquiry",
     "Inquiry",
     "Registration",
+]
+
+# Selectable Go-gate keys that already exist in gate_reason / SOURCE_GO_NO_GO.
+FUB_GO_GATE_FIELDS = [
+    {"key": "petitioner_first", "label": "Petitioner first name"},
+    {"key": "petitioner_last", "label": "Petitioner last name"},
+    {"key": "mailing_address", "label": "Petitioner mailing address"},
+    {"key": "decedent_residence", "label": "Estate location (decedent residence)"},
+]
+FUB_GO_GATE_FIELD_KEYS = [item["key"] for item in FUB_GO_GATE_FIELDS]
+DEFAULT_FUB_GO_REQUIRED_FIELDS = [
+    "petitioner_first",
+    "petitioner_last",
+    "mailing_address",
 ]
 
 FREQUENCIES = ["hourly", "daily", "weekdays", "weekly", "monthly"]
@@ -87,10 +115,19 @@ DEFAULTS = {
     CONF_FUB_STAGE: "",
     CONF_FUB_EVENT_TYPE: "Seller Inquiry",
     CONF_FUB_STRICT_PROPERTY: False,
+    CONF_FUB_GO_REQUIRED_FIELDS: None,
     CONF_FUB_VERIFY_ONLY: True,
     CONF_FUB_UPDATE_EXISTING: False,
     CONF_FUB_VERIFY_EXISTING: False,
     CONF_FUB_VERIFY_PERSON_ID: "",
+    CONF_SOURCE_ENABLED: {"placer": True, "sacramento": False},
+    CONF_SACRAMENTO_PORTAL_USER: "",
+    CONF_SACRAMENTO_PORTAL_PASSWORD: "",
+    CONF_SACRAMENTO_LOOKBACK_DAYS: 60,
+    CONF_SACRAMENTO_LOOKAHEAD_DAYS: 0,
+    CONF_PUBLIC_REPORTS_LOOKBACK_DAYS: 2,
+    CONF_SACRAMENTO_ECOURT_PAUSE: 1.2,
+    CONF_AUDIT_WEEKLY: True,
 }
 
 ATTR_LAST_RUN = "last_run"
