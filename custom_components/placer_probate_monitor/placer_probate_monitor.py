@@ -1081,13 +1081,23 @@ def enrich_listing(item: dict, seen_index: dict | None = None) -> dict:
     return row
 
 
-def stamp_listing_doc_urls(row: dict, data_dir: Path | None = None) -> dict:
-    """Attach DE-111 / DE-147 API download links when those PDFs are on disk."""
+def stamp_listing_doc_urls(
+    row: dict, data_dir: Path | None = None, document_base: str = ""
+) -> dict:
+    """Attach DE-111 / DE-147 API download links when those PDFs are on disk.
+
+    ``form_api_uri`` is only a relative ``/api/placer_probate_monitor/...``
+    path. On a listings page opened at ``http://192.168.x.x:8123`` the browser
+    would resolve that href to the LAN. When ``document_base`` is a Nabu Casa
+    remote UI origin, the stored href is absolute ``https://*.ui.nabu.casa``.
+    """
     try:
         from .datasources import local_de111_pdf, local_de147_pdf, petition_docs_dir
+        from .document_base import listing_document_href
         from .fub_client import form_api_uri
     except ImportError:
         from datasources import local_de111_pdf, local_de147_pdf, petition_docs_dir
+        from document_base import listing_document_href
         from fub_client import form_api_uri
 
     case = str(row.get("case_number") or "").strip()
@@ -1098,8 +1108,12 @@ def stamp_listing_doc_urls(row: dict, data_dir: Path | None = None) -> dict:
     has_de111 = bool(local_de111_pdf(primary, case) or local_de111_pdf(other, case))
     has_de147 = bool(local_de147_pdf(primary, case) or local_de147_pdf(other, case))
     docs = []
-    de111_url = form_api_uri(case, "de111") if has_de111 else ""
-    de147_url = form_api_uri(case, "de147") if has_de147 else ""
+    de111_url = listing_document_href(
+        form_api_uri(case, "de111") if has_de111 else "", document_base
+    )
+    de147_url = listing_document_href(
+        form_api_uri(case, "de147") if has_de147 else "", document_base
+    )
     if de111_url:
         docs.append({"label": "DE-111", "url": de111_url})
     if de147_url:
@@ -1379,7 +1393,7 @@ def write_fub_review_files(
     return csv_path, xlsx_path, len(listings)
 
 
-def build_listings_payload(data_dir: Path) -> dict:
+def build_listings_payload(data_dir: Path, document_base: str = "") -> dict:
     path = data_dir / "listings.json"
     catalog = _read_listings_catalog(path)
     catalog.update(_read_listings_catalog(data_dir / "listings_sacramento.json"))
@@ -1406,7 +1420,9 @@ def build_listings_payload(data_dir: Path) -> dict:
     seen = load_seen_case_index(data_dir)
     listings = sorted(
         (
-            stamp_listing_doc_urls(enrich_listing(item, seen), data_dir)
+            stamp_listing_doc_urls(
+                enrich_listing(item, seen), data_dir, document_base
+            )
             for item in catalog.values()
         ),
         key=listing_row_sort_key,

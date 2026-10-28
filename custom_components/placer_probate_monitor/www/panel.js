@@ -83,7 +83,7 @@ const PPM_CSS = `
   .ppm-filter-row input, .ppm-filter-row select { font-size: 12px; padding: 4px 6px; margin: 0; }
 `;
 
-const PPM_PANEL_VERSION = "1.3.155";
+const PPM_PANEL_VERSION = "1.3.156";
 
 function ppmParseAppView(hash) {
   const raw = String(hash || "").replace(/^#\/?/, "").split("?")[0].toLowerCase();
@@ -126,7 +126,7 @@ function ppmOcrNote(st) {
   if (ocr.enabled === false) {
     return `<p class="ppm-note">Petition OCR is turned off (PPM_PETITION_OCR=0). Image petitions stay native-text only.</p>`;
   }
-  return `<p class="ppm-note">Petition OCR is not ready yet on this box. Reload 1.3.155, wait until this note says Tesseract or RapidOCR, then Rescan local files on Placer and Sacramento.</p>`;
+  return `<p class="ppm-note">Petition OCR is not ready yet on this box. Reload 1.3.156, wait until this note says Tesseract or RapidOCR, then Rescan local files on Placer and Sacramento.</p>`;
 }
 
 function ppmSleep(ms) {
@@ -599,7 +599,85 @@ function ppmListingGoLabel(row) {
   return status;
 }
 
-function ppmListingDocs(row) {
+function ppmNabuOrigin(value) {
+  const text = String(value || "").trim();
+  if (!text || text.toLowerCase().indexOf("hooks.nabu.casa") >= 0) return "";
+  let host = text;
+  try {
+    const parsed = new URL(text.indexOf("://") === -1 ? `https://${text}` : text);
+    host = parsed.hostname || "";
+  } catch (_err) {
+    host = text.split("/")[0].split(":")[0];
+  }
+  host = String(host || "").toLowerCase().replace(/\.$/, "");
+  if (host === "hooks.nabu.casa") return "";
+  if (host === "ui.nabu.casa" || host.endsWith(".ui.nabu.casa")) return `https://${host}`;
+  return "";
+}
+
+function ppmIsPrivateDocumentHost(host, port) {
+  const name = String(host || "").toLowerCase().replace(/\.$/, "");
+  if (!name || name === "localhost" || name === "127.0.0.1" || name === "::1") return true;
+  if (name.endsWith(".local") || name.endsWith(".home") || name.endsWith(".localdomain")) return true;
+  if (/^(10\.|192\.168\.|169\.254\.|127\.)/.test(name)) return true;
+  if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(name)) return true;
+  if (String(port || "") === "8123") return true;
+  if (name.indexOf(".") === -1) return true;
+  return false;
+}
+
+function ppmListingDocHref(url, documentBase) {
+  const raw = String(url || "").trim();
+  const origin = ppmNabuOrigin(documentBase);
+  if (!raw) return "";
+  if (raw.startsWith("/") && !raw.startsWith("//")) {
+    return origin ? origin + raw : "";
+  }
+  let parsed;
+  try {
+    parsed = new URL(raw.indexOf("://") === -1 ? `http://${raw}` : raw);
+  } catch (_err) {
+    return "";
+  }
+  const host = String(parsed.hostname || "").toLowerCase();
+  if (host === "hooks.nabu.casa") return "";
+  const path = `${parsed.pathname || ""}${parsed.search || ""}${parsed.hash || ""}`;
+  if (host === "ui.nabu.casa" || host.endsWith(".ui.nabu.casa")) {
+    return `https://${host}${path}`;
+  }
+  if (!origin) return "";
+  if (ppmIsPrivateDocumentHost(host, parsed.port) || path.indexOf("/api/placer_probate_monitor/") === 0) {
+    return origin + path;
+  }
+  return "";
+}
+
+async function ppmCloudRemoteOrigin(hass) {
+  if (!hass || typeof hass.callApi !== "function") return "";
+  try {
+    const status = await hass.callApi("GET", "cloud/status");
+    if (!status || status.logged_in === false) return "";
+    const cert = status.remote_certificate || {};
+    const prefs = status.prefs || {};
+    const candidates = [
+      status.remote_domain,
+      status.remote_ui,
+      cert.common_name,
+      prefs.remote_domain,
+      prefs.remote_ui,
+    ];
+    (cert.alternative_names || []).forEach((name) => candidates.push(name));
+    for (let i = 0; i < candidates.length; i += 1) {
+      const origin = ppmNabuOrigin(candidates[i]);
+      if (origin) return origin;
+    }
+  } catch (_err) {
+    return "";
+  }
+  return "";
+}
+
+function ppmListingDocEntries(row) {
   const rec = row || {};
   const items = Array.isArray(rec.docs) ? rec.docs : [];
   const out = [];
@@ -615,8 +693,15 @@ function ppmListingDocs(row) {
   return out;
 }
 
+function ppmListingDocs(row, documentBase) {
+  return ppmListingDocEntries(row).map((item) => ({
+    label: item.label,
+    url: ppmListingDocHref(item.url, documentBase),
+  })).filter((item) => item.url && item.url.indexOf("hooks.nabu.casa") === -1);
+}
+
 function ppmListingDocsLabel(row) {
-  const labels = ppmListingDocs(row).map((item) => item.label);
+  const labels = ppmListingDocEntries(row).map((item) => item.label);
   return labels.length ? labels.join(" ") : "";
 }
 
@@ -2437,6 +2522,7 @@ class PlacerProbateListingsPanel extends HTMLElement {
     this._sortKey = "added_at";
     this._sortDir = "desc";
     this._colFilters = {};
+    this._documentBase = "";
   }
 
   set hass(hass) {
@@ -2607,7 +2693,7 @@ class PlacerProbateListingsPanel extends HTMLElement {
   }
 
   _docsCell(row) {
-    const docs = ppmListingDocs(row);
+    const docs = ppmListingDocs(row, this._documentBase);
     if (!docs.length) return "—";
     return docs.map((item) => (
       `<a href="${ppmEsc(item.url)}" target="_blank" rel="noopener">${ppmEsc(item.label)}</a>`
@@ -2764,6 +2850,9 @@ class PlacerProbateListingsPanel extends HTMLElement {
     this._flash("Loading collected listings…", true);
     try {
       const data = await this._hass.callApi("GET", "placer_probate_monitor/listings");
+      let origin = ppmNabuOrigin(data.document_base);
+      if (!origin) origin = await ppmCloudRemoteOrigin(this._hass);
+      this._documentBase = origin || "";
       this._rows = data.listings || [];
       this._share = {
         share_url: data.share_url || "",

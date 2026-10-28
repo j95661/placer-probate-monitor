@@ -254,6 +254,34 @@ def public_document_url(url: str, nabu_base: str) -> str:
     return f"{origin}{path}{query}{fragment}"
 
 
+def listing_document_href(url: str, document_base: str) -> str:
+    """Href for a probate listing Documents cell.
+
+    When a Nabu Casa remote UI host is known, relative ``/api/...`` paths and
+    private, localhost, or ``host:8123`` URLs become
+    ``https://<instance>.ui.nabu.casa/api/placer_probate_monitor/...``.
+    ``hooks.nabu.casa`` is never the document host. A private IP is not
+    returned once that remote UI host exists.
+    """
+    text = str(url or "").strip()
+    if not text:
+        return ""
+    if not is_nabu_casa_ui_url(document_base):
+        if is_local_or_private_url(text) or is_nabu_casa_cloudhook_url(text):
+            return ""
+        return text
+    rewritten = public_document_url(text, document_base)
+    if (
+        not rewritten
+        or not is_nabu_casa_ui_url(rewritten)
+        or is_nabu_casa_cloudhook_url(rewritten)
+        or is_local_or_private_url(rewritten)
+        or should_rewrite_document_url(rewritten)
+    ):
+        return ""
+    return rewritten
+
+
 def _attr(obj, name: str):
     if obj is None:
         return None
