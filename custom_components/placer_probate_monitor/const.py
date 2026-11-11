@@ -1,0 +1,149 @@
+"""Constants for Placer Probate Monitor."""
+
+DOMAIN = "placer_probate_monitor"
+
+CONF_RECIPIENTS = "recipients"
+CONF_SMTP_HOST = "smtp_host"
+CONF_SMTP_PORT = "smtp_port"
+CONF_SMTP_USER = "smtp_user"
+CONF_SMTP_PASSWORD = "smtp_password"
+CONF_MAIL_FROM = "mail_from"
+CONF_SEND_EMAIL = "send_email"
+CONF_FREQUENCY = "frequency"
+CONF_RUN_TIME = "run_time"
+CONF_WEEKLY_DAY = "weekly_day"
+CONF_MONTHLY_DAY = "monthly_day"
+CONF_TIMEZONE = "timezone"
+CONF_RUN_ON_START = "run_on_start"
+CONF_LOOKBACK_DAYS = "lookback_days"
+CONF_LOOKAHEAD_DAYS = "lookahead_days"
+CONF_COUNTY = "county"
+CONF_KEYWORDS = "keywords"
+CONF_SKIP_PORTAL = "skip_portal"
+CONF_GENERATE_PDF = "generate_pdf"
+CONF_ECOURT_PAUSE = "ecourt_pause_seconds"
+CONF_MAX_PAGES = "max_search_pages"
+CONF_FUB_ENABLED = "fub_enabled"
+CONF_FUB_API_URL = "fub_api_url"
+CONF_FUB_API_KEY = "fub_api_key"
+CONF_FUB_SYSTEM_KEY = "fub_system_key"
+CONF_FUB_SOURCE = "fub_source"
+CONF_FUB_ASSIGNED_TO = "fub_assigned_to"
+CONF_FUB_STAGE = "fub_stage"
+CONF_FUB_EVENT_TYPE = "fub_event_type"
+CONF_FUB_STRICT_PROPERTY = "fub_strict_property"
+CONF_FUB_GO_REQUIRED_FIELDS = "fub_go_required_fields"
+CONF_FUB_VERIFY_ONLY = "fub_verify_only"
+CONF_FUB_UPDATE_EXISTING = "fub_update_existing"
+CONF_FUB_VERIFY_EXISTING = "fub_verify_existing"
+CONF_FUB_VERIFY_PERSON_ID = "fub_verify_person_id"
+CONF_SOURCE_ENABLED = "source_enabled"
+CONF_SACRAMENTO_PORTAL_USER = "sacramento_portal_user"
+CONF_SACRAMENTO_PORTAL_PASSWORD = "sacramento_portal_password"
+CONF_SACRAMENTO_LOOKBACK_DAYS = "sacramento_lookback_days"
+CONF_SACRAMENTO_LOOKAHEAD_DAYS = "sacramento_lookahead_days"
+CONF_PUBLIC_REPORTS_LOOKBACK_DAYS = "public_reports_lookback_days"
+CONF_SACRAMENTO_ECOURT_PAUSE = "sacramento_ecourt_pause_seconds"
+CONF_AUDIT_WEEKLY = "audit_weekly"
+CONF_AFFIDAVIT_SWEEP = "affidavit_sweep"
+CONF_AFFIDAVIT_SWEEP_HOUR = "affidavit_sweep_hour"
+
+FUB_LEAD_SOURCE_BY_COUNTY = {
+    "placer": "probate",
+    "sacramento": "probate",
+}
+
+FUB_EVENT_TYPES = [
+    "Seller Inquiry",
+    "General Inquiry",
+    "Property Inquiry",
+    "Inquiry",
+    "Registration",
+]
+
+# Selectable Go-gate keys that already exist in gate_reason / SOURCE_GO_NO_GO.
+FUB_GO_GATE_FIELDS = [
+    {"key": "petitioner_first", "label": "Petitioner first name"},
+    {"key": "petitioner_last", "label": "Petitioner last name"},
+    {"key": "mailing_address", "label": "Petitioner mailing address"},
+    {"key": "decedent_residence", "label": "Estate location (decedent residence)"},
+]
+FUB_GO_GATE_FIELD_KEYS = [item["key"] for item in FUB_GO_GATE_FIELDS]
+DEFAULT_FUB_GO_REQUIRED_FIELDS = [
+    "petitioner_first",
+    "petitioner_last",
+    "mailing_address",
+]
+
+FREQUENCIES = ["hourly", "daily", "weekdays", "weekly", "monthly"]
+WEEKDAYS = [
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
+]
+
+DEFAULTS = {
+    CONF_RECIPIENTS: "",
+    CONF_SMTP_HOST: "smtp.gmail.com",
+    CONF_SMTP_PORT: 587,
+    CONF_SMTP_USER: "",
+    CONF_SMTP_PASSWORD: "",
+    CONF_MAIL_FROM: "",
+    CONF_SEND_EMAIL: True,
+    CONF_FREQUENCY: "daily",
+    CONF_RUN_TIME: "08:30:00",
+    CONF_WEEKLY_DAY: "monday",
+    CONF_MONTHLY_DAY: 1,
+    CONF_TIMEZONE: "America/Los_Angeles",
+    CONF_RUN_ON_START: False,
+    CONF_LOOKBACK_DAYS: 21,
+    CONF_LOOKAHEAD_DAYS: 21,
+    CONF_COUNTY: "Placer",
+    CONF_KEYWORDS: '"NOTICE OF PETITION TO ADMINISTER ESTATE"',
+    CONF_SKIP_PORTAL: False,
+    CONF_GENERATE_PDF: True,
+    CONF_ECOURT_PAUSE: 1.2,
+    CONF_MAX_PAGES: 10,
+    CONF_FUB_ENABLED: False,
+    CONF_FUB_API_URL: "https://api.followupboss.com/v1",
+    CONF_FUB_API_KEY: "",
+    CONF_FUB_SYSTEM_KEY: "",
+    CONF_FUB_SOURCE: "probate",
+    CONF_FUB_ASSIGNED_TO: "Blake Hammond",
+    CONF_FUB_STAGE: "",
+    CONF_FUB_EVENT_TYPE: "Seller Inquiry",
+    CONF_FUB_STRICT_PROPERTY: False,
+    CONF_FUB_GO_REQUIRED_FIELDS: None,
+    CONF_FUB_VERIFY_ONLY: True,
+    CONF_FUB_UPDATE_EXISTING: False,
+    CONF_FUB_VERIFY_EXISTING: False,
+    CONF_FUB_VERIFY_PERSON_ID: "",
+    CONF_SOURCE_ENABLED: {"placer": True, "sacramento": False},
+    CONF_SACRAMENTO_PORTAL_USER: "",
+    CONF_SACRAMENTO_PORTAL_PASSWORD: "",
+    CONF_SACRAMENTO_LOOKBACK_DAYS: 60,
+    CONF_SACRAMENTO_LOOKAHEAD_DAYS: 0,
+    CONF_PUBLIC_REPORTS_LOOKBACK_DAYS: 2,
+    CONF_SACRAMENTO_ECOURT_PAUSE: 1.2,
+    CONF_AUDIT_WEEKLY: True,
+    CONF_AFFIDAVIT_SWEEP: True,
+    CONF_AFFIDAVIT_SWEEP_HOUR: 21,
+}
+
+ATTR_LAST_RUN = "last_run"
+ATTR_LAST_RESULT = "last_result"
+ATTR_LAST_ERROR = "last_error"
+ATTR_NEW_COUNT = "new_count"
+ATTR_NOTICE_COUNT = "notice_count"
+ATTR_PDF = "pdf"
+ATTR_FUB_POSTED = "fub_posted"
+ATTR_FUB_UPDATED = "fub_updated"
+ATTR_FUB_SKIPPED = "fub_skipped"
+ATTR_FUB_ERROR = "fub_error"
+ATTR_FUB_VERIFY = "fub_verify"
+ATTR_ECOURT_VIEW_LIMIT = "ecourt_view_limit"
+EVENT_ECOURT_VIEW_LIMIT = f"{DOMAIN}_ecourt_view_limit"

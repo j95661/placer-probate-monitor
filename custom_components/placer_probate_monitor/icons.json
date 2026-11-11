@@ -1,0 +1,29 @@
+{
+  "entity": {
+    "sensor": {
+      "status": {
+        "default": "mdi:gavel"
+      },
+      "last_run": {
+        "default": "mdi:clock-outline"
+      },
+      "new_cases": {
+        "default": "mdi:file-document-plus-outline"
+      },
+      "last_pdf": {
+        "default": "mdi:file-pdf-box"
+      },
+      "fub_posted": {
+        "default": "mdi:account-arrow-up"
+      }
+    }
+  },
+  "services": {
+    "run_now": "mdi:play",
+    "test_email": "mdi:email-fast-outline",
+    "verify_fub": "mdi:account-check-outline",
+    "preview_one": "mdi:eye-outline",
+    "rescan_local": "mdi:folder-refresh-outline",
+    "test_stored": "mdi:file-check-outline"
+  }
+}

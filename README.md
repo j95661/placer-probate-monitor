@@ -152,10 +152,10 @@ The PDF, text digest, HTML table, and dossier JSON use the same fields as Placer
 
 ## Dual Affidavit of Death sweep
 
-Standalone read-only CLI (`python -m sweep`) that takes Placer listings from
-the Home Assistant `placer_probate_monitor` API, OCRs DE-111 petitions,
-resolves APNs via Placer GIS, searches the CountyFusion guest recorder index,
-and ranks dual-affidavit leads. See [`sweep/README.md`](sweep/README.md).
+Standalone read-only CLI (`python -m sweep`) plus HA panel integration
+(v1.3.157+): Dual signals column, `/api/placer_probate_monitor/affidavits`,
+and `placer_probate_monitor.affidavit_sweep` (at most daily). See
+[`sweep/README.md`](sweep/README.md).
 
 ```bash
 pip install -r requirements.txt

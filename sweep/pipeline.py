@@ -200,6 +200,7 @@ class SweepRunner:
         fixtures_dir: Path | None = None,
         ha: HAClient | None = None,
         recorder: RecorderSource | None = None,
+        listings: list[dict] | None = None,
         max_searches: int = 40,
         refresh: bool = False,
         offline: bool = False,
@@ -209,6 +210,7 @@ class SweepRunner:
         self.refresh = refresh
         self.offline = offline or self.fixtures_dir is not None
         self.ha = ha
+        self._listings_override = list(listings) if listings is not None else None
         if recorder is not None:
             self.recorder = recorder
         else:
@@ -222,7 +224,14 @@ class SweepRunner:
             )
 
     def load_listings(self, *, case: str | None = None, since: str | None = None) -> list[dict]:
-        if self.fixtures_dir:
+        if self._listings_override is not None:
+            listings = [
+                row
+                for row in self._listings_override
+                if isinstance(row, dict)
+                and str(row.get("source") or "") in {"", "Placer County"}
+            ]
+        elif self.fixtures_dir:
             path = self.fixtures_dir / "listings" / "listings.json"
             listings = [
                 row

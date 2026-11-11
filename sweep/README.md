@@ -59,8 +59,14 @@ PYTHONPATH=. pytest -q sweep/tests
 
 CI uses recorded fixtures only — no live CountyFusion calls.
 
-## Later (not v1)
+## Home Assistant (v1.3.157+)
 
-Expose results as a “Dual signals” column on the Hammond Realty Probate
-listings tab via `/api/placer_probate_monitor/affidavits`, fed by a scheduled
-run at most daily.
+The integration vendors this pipeline as `dual_sweep` and exposes:
+
+- `GET /api/placer_probate_monitor/affidavits` — cached dual-signal payload
+- **Dual signals** column on the Probate listings tab (from `affidavits.json`)
+- Service `placer_probate_monitor.affidavit_sweep` (optional `force`, `refresh`)
+- Daily schedule (default 21:15 local), skipped if already ran that calendar day
+
+Results are written under the integration data dir as `affidavits.json`. Still
+never writes to Follow Up Boss.

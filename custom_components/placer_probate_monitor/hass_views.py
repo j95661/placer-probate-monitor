@@ -1,0 +1,1540 @@
+"""Authenticated source and Follow Up Boss screens for the HACS integration."""
+
+from __future__ import annotations
+
+import html
+import json
+import logging
+import re
+from pathlib import Path
+
+from aiohttp import web
+from aiohttp.web import FileResponse
+from homeassistant.components import frontend
+from homeassistant.components.http import HomeAssistantView
+from homeassistant.core import HomeAssistant
+
+from .const import (
+    ATTR_FUB_VERIFY,
+    CONF_ECOURT_PAUSE,
+    CONF_FUB_API_KEY,
+    CONF_FUB_SYSTEM_KEY,
+    CONF_FUB_API_URL,
+    CONF_FUB_ASSIGNED_TO,
+    CONF_FUB_STAGE,
+    CONF_FUB_ENABLED,
+    CONF_FUB_EVENT_TYPE,
+    CONF_FUB_GO_REQUIRED_FIELDS,
+    CONF_FUB_SOURCE,
+    CONF_FUB_STRICT_PROPERTY,
+    CONF_FUB_VERIFY_ONLY,
+    CONF_FUB_UPDATE_EXISTING,
+    CONF_FUB_VERIFY_EXISTING,
+    CONF_FUB_VERIFY_PERSON_ID,
+    CONF_GENERATE_PDF,
+    CONF_KEYWORDS,
+    CONF_LOOKAHEAD_DAYS,
+    CONF_LOOKBACK_DAYS,
+    CONF_MAX_PAGES,
+    CONF_SACRAMENTO_ECOURT_PAUSE,
+    CONF_SACRAMENTO_LOOKAHEAD_DAYS,
+    CONF_SACRAMENTO_LOOKBACK_DAYS,
+    CONF_SACRAMENTO_PORTAL_PASSWORD,
+    CONF_SACRAMENTO_PORTAL_USER,
+    CONF_SEND_EMAIL,
+    CONF_SKIP_PORTAL,
+    CONF_SOURCE_ENABLED,
+    DEFAULTS,
+    DOMAIN,
+    FUB_EVENT_TYPES,
+)
+from .datasources import (
+    STORED_DOCS_ZIP_URL,
+    all_stored_docs_inventory,
+    build_stored_pdfs_zip,
+    petition_docs_dir,
+    resolve_stored_pdf_file,
+)
+from .ha_logs import (
+    HA_LOGS_REQUIRES_AUTH,
+    HA_LOGS_URL,
+    HA_LOGS_VIEW_NAME,
+    build_ha_logs_payload,
+)
+from .fub_client import (
+    cleanup_listing_duplicate_notes,
+    inspect_fub_person,
+    mapping_payload,
+    apply_sacramento_source_settings,
+    fub_go_required_from_settings,
+    listings_share_http_error,
+    listings_share_payload,
+    listings_share_status,
+    LISTINGS_SHARE_PATH,
+    normalize_fub_go_required_fields,
+    normalize_source_enabled,
+    petition_file_token,
+    petition_safe_case,
+    save_mapping,
+    sources_payload,
+    FUB_GO_ALWAYS_NOGO,
+    FUB_GO_GATE_FIELDS,
+)
+
+PANEL_JS_VERSION = "1.3.157"
+
+_LOGGER = logging.getLogger(__name__)
+
+WWW = Path(__file__).resolve().parent / "www"
+MAP_HTML = WWW / "fub_map.html"
+PANEL_JS = WWW / "panel.js"
+PANEL_HOME_PATH = "hammond-realty"
+PANEL_FUB_PATH = "placer-probate-fub"
+PANEL_SOURCES_PATH = "placer-probate-sources"
+PANEL_LISTINGS_PATH = "placer-probate-listings"
+PANEL_PATHS = (PANEL_HOME_PATH, PANEL_FUB_PATH, PANEL_SOURCES_PATH, PANEL_LISTINGS_PATH)
+
+SOURCE_KEYS = {
+    CONF_LOOKBACK_DAYS,
+    CONF_LOOKAHEAD_DAYS,
+    CONF_KEYWORDS,
+    CONF_SKIP_PORTAL,
+    CONF_GENERATE_PDF,
+    CONF_ECOURT_PAUSE,
+    CONF_MAX_PAGES,
+}
+FUB_KEYS = {
+    CONF_FUB_ENABLED,
+    CONF_FUB_API_URL,
+    CONF_FUB_API_KEY,
+    CONF_FUB_SYSTEM_KEY,
+    CONF_FUB_SOURCE,
+    CONF_FUB_ASSIGNED_TO,
+    CONF_FUB_STAGE,
+    CONF_FUB_EVENT_TYPE,
+    CONF_FUB_STRICT_PROPERTY,
+    CONF_FUB_GO_REQUIRED_FIELDS,
+    CONF_FUB_VERIFY_ONLY,
+    CONF_FUB_UPDATE_EXISTING,
+    CONF_FUB_VERIFY_EXISTING,
+    CONF_FUB_VERIFY_PERSON_ID,
+}
+INT_KEYS = {
+    CONF_LOOKBACK_DAYS,
+    CONF_LOOKAHEAD_DAYS,
+    CONF_MAX_PAGES,
+    CONF_SACRAMENTO_LOOKBACK_DAYS,
+    CONF_SACRAMENTO_LOOKAHEAD_DAYS,
+}
+BOOL_KEYS = {
+    CONF_SKIP_PORTAL,
+    CONF_GENERATE_PDF,
+    CONF_FUB_ENABLED,
+    CONF_FUB_STRICT_PROPERTY,
+    CONF_FUB_VERIFY_ONLY,
+    CONF_FUB_UPDATE_EXISTING,
+    CONF_FUB_VERIFY_EXISTING,
+}
+
+
+def _fub_last(hass: HomeAssistant) -> dict:
+    path = Path(hass.config.path(DOMAIN)) / "fub_last.json"
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def mapping_file(hass: HomeAssistant) -> Path:
+    return Path(hass.config.path(DOMAIN)) / "fub_mapping.yaml"
+
+
+def _entry(hass: HomeAssistant):
+    entries = hass.config_entries.async_entries(DOMAIN)
+    return entries[0] if entries else None
+
+
+def _store(hass: HomeAssistant):
+    entry = _entry(hass)
+    if not entry:
+        return None
+    return (hass.data.get(DOMAIN) or {}).get(entry.entry_id)
+
+
+def _merged(entry) -> dict:
+    return {**DEFAULTS, **entry.data, **entry.options}
+
+
+def _api_error(message: str, status: int = 400, **extra):
+    """HA frontend callApi only surfaces JSON `message`, not `error`."""
+    payload = {"ok": False, "error": message, "message": message}
+    payload.update(extra)
+    return payload, status
+
+
+def _download_bytes_response(body: bytes, *, filename: str, fmt: str) -> web.Response:
+    """Attachment response. Do not put charset inside content_type (aiohttp 500)."""
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    if fmt == "csv":
+        return web.Response(
+            body=body,
+            content_type="text/csv",
+            charset="utf-8",
+            headers=headers,
+        )
+    return web.Response(
+        body=body,
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers=headers,
+    )
+
+
+async def _export_file(view, request, builder, fmt: str, filename: str):
+    try:
+        body = await view.hass.async_add_executor_job(
+            builder, view.hass, request.query, fmt
+        )
+    except Exception as exc:  # noqa: BLE001
+        payload, status = _api_error(str(exc) or "Export failed.", status=500)
+        return view.json(payload, status_code=status)
+    return _download_bytes_response(body, filename=filename, fmt=fmt)
+
+
+def _apply_key(hass: HomeAssistant) -> None:
+    import os
+
+    entry = _entry(hass)
+    if not entry:
+        return
+    settings = _merged(entry)
+    os.environ["FUB_API_URL"] = str(
+        settings.get(CONF_FUB_API_URL) or "https://api.followupboss.com/v1"
+    )
+    os.environ["FUB_API_KEY"] = str(settings.get(CONF_FUB_API_KEY) or "")
+    os.environ["FUB_SYSTEM_KEY"] = str(settings.get(CONF_FUB_SYSTEM_KEY) or "")
+    os.environ["FUB_MAPPING_PATH"] = str(mapping_file(hass))
+
+
+def _coerce(key: str, value):
+    if key in BOOL_KEYS:
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+    if key in INT_KEYS:
+        return int(value)
+    if key in {CONF_ECOURT_PAUSE, CONF_SACRAMENTO_ECOURT_PAUSE}:
+        return float(value)
+    if key == CONF_FUB_GO_REQUIRED_FIELDS:
+        return normalize_fub_go_required_fields(value)
+    return value
+
+
+def _persist_go_required(merged: dict, body: dict) -> None:
+    if CONF_FUB_GO_REQUIRED_FIELDS in body:
+        fields = normalize_fub_go_required_fields(body.get(CONF_FUB_GO_REQUIRED_FIELDS))
+        merged[CONF_FUB_GO_REQUIRED_FIELDS] = fields
+        merged[CONF_FUB_STRICT_PROPERTY] = "decedent_residence" in fields
+        return
+    if CONF_FUB_STRICT_PROPERTY in body:
+        fields = fub_go_required_from_settings(merged)
+        if merged.get(CONF_FUB_STRICT_PROPERTY):
+            if "decedent_residence" not in fields:
+                fields.append("decedent_residence")
+        else:
+            fields = [key for key in fields if key != "decedent_residence"]
+        merged[CONF_FUB_GO_REQUIRED_FIELDS] = fields
+
+
+def _public_fub(settings: dict) -> dict:
+    key = str(settings.get(CONF_FUB_API_KEY) or "")
+    return {
+        CONF_FUB_ENABLED: bool(settings.get(CONF_FUB_ENABLED)),
+        CONF_FUB_API_URL: settings.get(CONF_FUB_API_URL)
+        or "https://api.followupboss.com/v1",
+        CONF_FUB_API_KEY: "",
+        "fub_api_key_set": bool(key),
+        CONF_FUB_SYSTEM_KEY: "",
+        "fub_system_key_set": bool(str(settings.get(CONF_FUB_SYSTEM_KEY) or "")),
+        CONF_FUB_SOURCE: settings.get(CONF_FUB_SOURCE) or "probate",
+        CONF_FUB_ASSIGNED_TO: settings.get(CONF_FUB_ASSIGNED_TO) or "Blake Hammond",
+        CONF_FUB_STAGE: str(settings.get(CONF_FUB_STAGE) or "").strip(),
+        CONF_FUB_EVENT_TYPE: settings.get(CONF_FUB_EVENT_TYPE) or "Seller Inquiry",
+        CONF_FUB_GO_REQUIRED_FIELDS: fub_go_required_from_settings(settings),
+        "fub_go_gate_fields": list(FUB_GO_GATE_FIELDS),
+        "fub_go_always_nogo": list(FUB_GO_ALWAYS_NOGO),
+        CONF_FUB_STRICT_PROPERTY: "decedent_residence"
+        in fub_go_required_from_settings(settings),
+        CONF_FUB_VERIFY_ONLY: bool(settings.get(CONF_FUB_VERIFY_ONLY, True)),
+        CONF_FUB_UPDATE_EXISTING: bool(settings.get(CONF_FUB_UPDATE_EXISTING, False)),
+        CONF_FUB_VERIFY_EXISTING: bool(settings.get(CONF_FUB_VERIFY_EXISTING, False)),
+        CONF_FUB_VERIFY_PERSON_ID: str(
+            settings.get(CONF_FUB_VERIFY_PERSON_ID) or ""
+        ).strip(),
+        "event_types": FUB_EVENT_TYPES,
+    }
+
+
+class FubMapPageView(HomeAssistantView):
+    url = "/api/placer_probate_monitor/fub_map"
+    name = "api:placer_probate_monitor:fub_map"
+    requires_auth = True
+
+    async def get(self, request):
+        return web.FileResponse(MAP_HTML)
+
+
+class FubPanelJsView(HomeAssistantView):
+    """Frontend loads this without a bearer token."""
+
+    url = "/api/placer_probate_monitor/panel.js"
+    name = "api:placer_probate_monitor:panel_js"
+    requires_auth = False
+
+    async def get(self, request):
+        return web.FileResponse(
+            PANEL_JS,
+            headers={
+                "Cache-Control": "no-store, must-revalidate",
+                "Pragma": "no-cache",
+            },
+        )
+
+
+class FubMappingView(HomeAssistantView):
+    url = "/api/placer_probate_monitor/fub_mapping"
+    name = "api:placer_probate_monitor:fub_mapping"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.hass = hass
+
+    async def get(self, request):
+        _apply_key(self.hass)
+        path = mapping_file(self.hass)
+        source_id = str(request.query.get("source") or "placer")
+        entry = _entry(self.hass)
+        settings = _merged(entry) if entry else dict(DEFAULTS)
+        payload = await self.hass.async_add_executor_job(
+            lambda: mapping_payload(
+                path, fetch_fub=True, source_id=source_id, settings=settings
+            )
+        )
+        return self.json(payload)
+
+    async def post(self, request):
+        _apply_key(self.hass)
+        body = await request.json()
+        if not isinstance(body, dict):
+            return self.json({"error": "Expected a JSON object."}, status_code=400)
+        path = mapping_file(self.hass)
+        source_id = str(body.get("source_id") or "placer")
+        entry = _entry(self.hass)
+        settings = _merged(entry) if entry else dict(DEFAULTS)
+
+        def _save():
+            save_mapping(body, path)
+            return mapping_payload(
+                path, fetch_fub=True, source_id=source_id, settings=settings
+            )
+
+        try:
+            payload = await self.hass.async_add_executor_job(_save)
+        except ValueError as exc:
+            return self.json({"error": str(exc)}, status_code=400)
+        return self.json(payload)
+
+
+class FubPersonView(HomeAssistantView):
+    url = "/api/placer_probate_monitor/fub_person"
+    name = "api:placer_probate_monitor:fub_person"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.hass = hass
+
+    async def get(self, request):
+        _apply_key(self.hass)
+        query = str(request.query.get("q") or request.query.get("id") or "")
+        payload = await self.hass.async_add_executor_job(inspect_fub_person, query)
+        status = 200 if payload.get("person_id") else 400
+        return self.json(payload, status_code=status)
+
+
+def _parse_cleanup_skip_ids(raw) -> list[int]:
+    if raw in (None, "", []):
+        return []
+    if isinstance(raw, (int, float)):
+        raw = [raw]
+    if isinstance(raw, str):
+        raw = raw.replace(",", " ").split()
+    out: list[int] = []
+    for item in raw:
+        try:
+            value = int(item)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            out.append(value)
+    return out
+
+
+def run_fub_notes_cleanup(hass: HomeAssistant, body: dict | None = None) -> dict:
+    """Dry-run (default) or clean one listing person. Never harvests."""
+    payload = body if isinstance(body, dict) else {}
+    _apply_key(hass)
+    entry = _entry(hass)
+    if not entry:
+        err, _status = _api_error("Integration is not configured.")
+        raise ValueError(err["message"])
+    settings = _merged(entry)
+    api_key = str(settings.get(CONF_FUB_API_KEY) or "").strip()
+    if not api_key:
+        err, _status = _api_error("Set the Follow Up Boss API key first.")
+        raise ValueError(err["message"])
+    apply = bool(payload.get("apply"))
+    dry_run = True if "dry_run" not in payload else bool(payload.get("dry_run"))
+    if apply:
+        dry_run = False
+    person_raw = str(payload.get("person_id") or "").strip()
+    person_id = int(person_raw) if person_raw.isdigit() and int(person_raw) > 0 else None
+    if not dry_run and not person_id:
+        err, _status = _api_error(
+            "Live note cleanup requires one Follow Up Boss person ID."
+        )
+        raise ValueError(err["message"])
+    listings = _listings_payload(hass).get("listings") or []
+    return cleanup_listing_duplicate_notes(
+        listings,
+        api_url=str(settings.get(CONF_FUB_API_URL) or "https://api.followupboss.com/v1"),
+        api_key=api_key,
+        system="PlacerProbateMonitor",
+        dry_run=dry_run,
+        person_id=person_id,
+        skip_person_ids=_parse_cleanup_skip_ids(payload.get("skip_person_ids")),
+    )
+
+
+class FubNotesCleanupView(HomeAssistantView):
+    url = "/api/placer_probate_monitor/fub_notes_cleanup"
+    name = "api:placer_probate_monitor:fub_notes_cleanup"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.hass = hass
+
+    async def post(self, request):
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        try:
+            payload = await self.hass.async_add_executor_job(
+                run_fub_notes_cleanup, self.hass, body
+            )
+        except ValueError as exc:
+            err, status = _api_error(str(exc))
+            return self.json(err, status_code=status)
+        except Exception as exc:  # noqa: BLE001
+            err, status = _api_error(str(exc)[:300], status=500)
+            return self.json(err, status_code=status)
+        return self.json(payload)
+
+
+class SourcesView(HomeAssistantView):
+    url = "/api/placer_probate_monitor/sources"
+    name = "api:placer_probate_monitor:sources"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.hass = hass
+
+    async def get(self, request):
+        entry = _entry(self.hass)
+        settings = _merged(entry) if entry else dict(DEFAULTS)
+        return self.json(sources_payload(settings))
+
+    async def post(self, request):
+        entry = _entry(self.hass)
+        if not entry:
+            return self.json({"error": "Integration is not configured."}, status_code=400)
+        body = await request.json()
+        if not isinstance(body, dict):
+            return self.json({"error": "Expected a JSON object."}, status_code=400)
+        merged = _merged(entry)
+        source_id = str(body.get("source_id") or "").strip().lower()
+        if "enabled" in body and source_id in {"placer", "sacramento"}:
+            flags = normalize_source_enabled(merged)
+            flags[source_id] = bool(body.get("enabled"))
+            merged[CONF_SOURCE_ENABLED] = flags
+        if source_id == "sacramento":
+            if CONF_SACRAMENTO_PORTAL_USER in body:
+                merged[CONF_SACRAMENTO_PORTAL_USER] = str(
+                    body.get(CONF_SACRAMENTO_PORTAL_USER) or ""
+                ).strip()
+            if CONF_SACRAMENTO_PORTAL_PASSWORD in body:
+                value = str(body.get(CONF_SACRAMENTO_PORTAL_PASSWORD) or "").strip()
+                if value and value not in {"••••••••", "********"}:
+                    merged[CONF_SACRAMENTO_PORTAL_PASSWORD] = value
+            try:
+                merged = apply_sacramento_source_settings(merged, body)
+            except (TypeError, ValueError):
+                return self.json(
+                    {
+                        "error": "Invalid Sacramento CNPA window, Public Reports lookback, or portal pause."
+                    },
+                    status_code=400,
+                )
+        if source_id in {"", "placer"}:
+            for key in SOURCE_KEYS:
+                if key not in body:
+                    continue
+                try:
+                    merged[key] = _coerce(key, body[key])
+                except (TypeError, ValueError):
+                    return self.json({"error": f"Invalid {key}."}, status_code=400)
+            merged["county"] = "Placer"
+        _persist_go_required(merged, body)
+        self.hass.config_entries.async_update_entry(entry, options=merged)
+        return self.json(sources_payload(merged))
+
+
+class FubSettingsView(HomeAssistantView):
+    url = "/api/placer_probate_monitor/fub_settings"
+    name = "api:placer_probate_monitor:fub_settings"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.hass = hass
+
+    async def get(self, request):
+        entry = _entry(self.hass)
+        settings = _merged(entry) if entry else dict(DEFAULTS)
+        return self.json(_public_fub(settings))
+
+    async def post(self, request):
+        entry = _entry(self.hass)
+        if not entry:
+            return self.json({"error": "Integration is not configured."}, status_code=400)
+        body = await request.json()
+        if not isinstance(body, dict):
+            return self.json({"error": "Expected a JSON object."}, status_code=400)
+        merged = _merged(entry)
+        for key in FUB_KEYS:
+            if key not in body:
+                continue
+            if key in {CONF_FUB_API_KEY, CONF_FUB_SYSTEM_KEY}:
+                value = str(body[key] or "").strip()
+                if not value or value in {"••••••••", "********"}:
+                    continue
+                merged[key] = value
+                continue
+            if key == CONF_FUB_VERIFY_PERSON_ID:
+                merged[key] = str(body[key] or "").strip()
+                continue
+            try:
+                merged[key] = _coerce(key, body[key])
+            except (TypeError, ValueError):
+                return self.json({"error": f"Invalid {key}."}, status_code=400)
+        _persist_go_required(merged, body)
+        self.hass.config_entries.async_update_entry(entry, options=merged)
+        return self.json(_public_fub(merged))
+
+
+_SAC_CASE_NAME = re.compile(r"^\d{2}PR\d+$", re.I)
+
+
+def _resolve_stored_pdf(hass: HomeAssistant, safe: str, kind: str) -> Path | None:
+    root = Path(hass.config.path(DOMAIN)).resolve()
+    placer = petition_docs_dir("placer", data_dir=root).resolve()
+    sacramento = petition_docs_dir("sacramento", data_dir=root).resolve()
+    bases = [sacramento, placer] if _SAC_CASE_NAME.match(safe) else [placer, sacramento]
+    suffix = {"de111": "DE-111", "de147": "DE-147", "de150": "DE-150"}.get(kind, "DE-111")
+    named = f"{safe}_{suffix}.pdf"
+    for docs in bases:
+        try:
+            docs.relative_to(root)
+        except ValueError:
+            continue
+        folder = (docs / safe).resolve()
+        try:
+            folder.relative_to(docs)
+        except ValueError:
+            continue
+        path = folder / named
+        if path.is_file():
+            return path
+        if kind == "de111" and folder.is_dir():
+            matches = sorted(
+                item
+                for item in folder.glob("*.pdf")
+                if "_DE-147" not in item.name.upper()
+                and "_DE-150" not in item.name.upper()
+                and "_DE-160" not in item.name.upper()
+                and "_DE-161" not in item.name.upper()
+            )
+            if matches:
+                return matches[0]
+    return None
+
+
+class PetitionPdfView(HomeAssistantView):
+    url = "/api/placer_probate_monitor/de111/{token}/{slug}"
+    name = "api:placer_probate_monitor:de111"
+    requires_auth = False
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.hass = hass
+
+    async def get(self, request, token, slug):
+        import hmac as hmac_mod
+
+        name = Path(str(slug or "")).name
+        if not name.lower().endswith(".pdf"):
+            return self.json({"error": "not found"}, status_code=404)
+        safe = petition_safe_case(Path(name).stem)
+        entry = _entry(self.hass)
+        expected = petition_file_token(safe, secret=entry.entry_id if entry else None)
+        if not hmac_mod.compare_digest(str(token or ""), expected):
+            return self.json({"error": "not found"}, status_code=404)
+        path = _resolve_stored_pdf(self.hass, safe, "de111")
+        if not path or not path.is_file():
+            return self.json({"error": "not found"}, status_code=404)
+        filename = f"{safe}_DE-111.pdf"
+        return FileResponse(
+            path,
+            headers={
+                "Content-Type": "application/pdf",
+                "Content-Disposition": f'inline; filename="{filename}"',
+            },
+        )
+
+
+class DutiesPdfView(HomeAssistantView):
+    url = "/api/placer_probate_monitor/de147/{token}/{slug}"
+    name = "api:placer_probate_monitor:de147"
+    requires_auth = False
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.hass = hass
+
+    async def get(self, request, token, slug):
+        import hmac as hmac_mod
+
+        name = Path(str(slug or "")).name
+        if not name.lower().endswith(".pdf"):
+            return self.json({"error": "not found"}, status_code=404)
+        safe = petition_safe_case(Path(name).stem)
+        entry = _entry(self.hass)
+        expected = petition_file_token(
+            safe, secret=entry.entry_id if entry else None, kind="de147"
+        )
+        if not hmac_mod.compare_digest(str(token or ""), expected):
+            return self.json({"error": "not found"}, status_code=404)
+        path = _resolve_stored_pdf(self.hass, safe, "de147")
+        if not path or not path.is_file():
+            return self.json({"error": "not found"}, status_code=404)
+        filename = f"{safe}_DE-147.pdf"
+        return FileResponse(
+            path,
+            headers={
+                "Content-Type": "application/pdf",
+                "Content-Disposition": f'inline; filename="{filename}"',
+            },
+        )
+
+
+class LettersPdfView(HomeAssistantView):
+    url = "/api/placer_probate_monitor/de150/{token}/{slug}"
+    name = "api:placer_probate_monitor:de150"
+    requires_auth = False
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.hass = hass
+
+    async def get(self, request, token, slug):
+        import hmac as hmac_mod
+
+        name = Path(str(slug or "")).name
+        if not name.lower().endswith(".pdf"):
+            return self.json({"error": "not found"}, status_code=404)
+        safe = petition_safe_case(Path(name).stem)
+        entry = _entry(self.hass)
+        expected = petition_file_token(
+            safe, secret=entry.entry_id if entry else None, kind="de150"
+        )
+        if not hmac_mod.compare_digest(str(token or ""), expected):
+            return self.json({"error": "not found"}, status_code=404)
+        path = _resolve_stored_pdf(self.hass, safe, "de150")
+        if not path or not path.is_file():
+            return self.json({"error": "not found"}, status_code=404)
+        filename = f"{safe}_DE-150.pdf"
+        return FileResponse(
+            path,
+            headers={
+                "Content-Type": "application/pdf",
+                "Content-Disposition": f'inline; filename="{filename}"',
+            },
+        )
+
+
+class JobView(HomeAssistantView):
+    url = "/api/placer_probate_monitor/job"
+    name = "api:placer_probate_monitor:job"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.hass = hass
+
+    def _status(self) -> dict | None:
+        store = _store(self.hass)
+        if not store:
+            return None
+        payload = dict(store.get("status") or {})
+        payload["running"] = bool(store.get("running"))
+        if payload["running"]:
+            payload["fub_posted"] = None
+            payload["fub_updated"] = None
+            payload["fub_skipped"] = None
+            payload["new_count"] = None
+            payload["notice_count"] = None
+        progress_file = Path(self.hass.config.path(DOMAIN)) / "job_progress.json"
+        try:
+            from .job_progress import read_progress
+        except ImportError:
+            from job_progress import read_progress
+
+        progress = read_progress(progress_file)
+        if progress:
+            payload["progress"] = progress
+            if progress.get("source_id") and not payload.get("source_id"):
+                payload["source_id"] = progress.get("source_id")
+            for key in (
+                "new_count",
+                "notice_count",
+                "fub_posted",
+                "fub_updated",
+                "fub_skipped",
+            ):
+                if payload.get("running") and progress.get(key) is not None:
+                    payload[key] = progress.get(key)
+        last = _fub_last(self.hass)
+        if last.get("verify_record"):
+            payload[ATTR_FUB_VERIFY] = last.get("verify_record")
+        elif last.get("verify_note"):
+            payload[ATTR_FUB_VERIFY] = {"note": last.get("verify_note")}
+        if last.get("verify_note"):
+            payload["fub_verify_note"] = last.get("verify_note")
+        payload["fub_skips"] = last.get("skips") or []
+        payload["fub_preview"] = bool(last.get("preview"))
+        if last.get("error"):
+            payload["fub_error"] = last.get("error")
+        if last.get("stored_test"):
+            payload["stored_test"] = True
+        if last.get("rescan_go"):
+            payload["rescan_go"] = True
+        if last.get("go_count") is not None:
+            payload["go_count"] = last.get("go_count")
+        if last.get("nogo_count") is not None:
+            payload["nogo_count"] = last.get("nogo_count")
+        if last.get("cases"):
+            payload["stored_cases"] = last.get("cases")
+        ocr = {}
+        domain = self.hass.data.get(DOMAIN) or {}
+        if isinstance(domain.get("ocr"), dict):
+            ocr = dict(domain.get("ocr") or {})
+        payload["ocr"] = ocr
+        return payload
+
+    async def get(self, request):
+        status = self._status()
+        if status is None:
+            return self.json({"error": "Integration is not configured."}, status_code=400)
+        return self.json(status)
+
+    async def post(self, request):
+        store = _store(self.hass)
+        entry = _entry(self.hass)
+        runner = (store or {}).get("run") if store else None
+        if not store or not runner or not entry:
+            payload, status = _api_error("Integration is not configured.")
+            return self.json(payload, status_code=status)
+        if store.get("running"):
+            payload, status = _api_error(
+                "A run is already in progress.", status=409, running=True
+            )
+            return self.json(payload, status_code=status)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        action = str(body.get("action") or "run")
+        source_id = str(body.get("source_id") or "").strip().lower()
+        if source_id and source_id not in {"placer", "sacramento"}:
+            payload, status = _api_error("Unknown data source.")
+            return self.json(payload, status_code=status)
+        extra = {"source_id": source_id} if source_id else {}
+        if action == "verify":
+            settings = _merged(entry)
+            if not str(settings.get(CONF_FUB_API_KEY) or "").strip():
+                payload, status = _api_error("Set the Follow Up Boss API key first.")
+                return self.json(payload, status_code=status)
+            use_existing = _coerce(
+                CONF_FUB_VERIFY_EXISTING,
+                body.get(CONF_FUB_VERIFY_EXISTING, settings.get(CONF_FUB_VERIFY_EXISTING)),
+            )
+            person_id = str(
+                body.get(CONF_FUB_VERIFY_PERSON_ID, settings.get(CONF_FUB_VERIFY_PERSON_ID) or "")
+            ).strip()
+            if use_existing and (not person_id.isdigit() or int(person_id) <= 0):
+                payload, status = _api_error(
+                    "Enter the Follow Up Boss person ID to update."
+                )
+                return self.json(payload, status_code=status)
+            merged = dict(settings)
+            merged[CONF_FUB_VERIFY_EXISTING] = bool(use_existing)
+            merged[CONF_FUB_VERIFY_PERSON_ID] = person_id
+            self.hass.config_entries.async_update_entry(entry, options=merged)
+            self.hass.async_create_task(
+                runner(
+                    "verify_fub",
+                    {
+                        CONF_FUB_ENABLED: True,
+                        CONF_FUB_VERIFY_ONLY: True,
+                        CONF_FUB_UPDATE_EXISTING: False,
+                        CONF_SEND_EMAIL: False,
+                        CONF_GENERATE_PDF: False,
+                        CONF_FUB_VERIFY_EXISTING: bool(use_existing),
+                        CONF_FUB_VERIFY_PERSON_ID: person_id,
+                        **extra,
+                    },
+                )
+            )
+        elif action == "preview":
+            use_existing = _coerce(
+                CONF_FUB_VERIFY_EXISTING,
+                body.get(CONF_FUB_VERIFY_EXISTING, False),
+            )
+            person_id = str(body.get(CONF_FUB_VERIFY_PERSON_ID) or "").strip()
+            self.hass.async_create_task(
+                runner(
+                    "preview_one",
+                    {
+                        "fub_preview_one": True,
+                        CONF_FUB_ENABLED: False,
+                        CONF_FUB_VERIFY_ONLY: False,
+                        CONF_SEND_EMAIL: False,
+                        CONF_GENERATE_PDF: False,
+                        CONF_FUB_VERIFY_EXISTING: bool(use_existing),
+                        CONF_FUB_VERIFY_PERSON_ID: person_id,
+                        **extra,
+                    },
+                )
+            )
+        elif action == "rescan":
+            self.hass.async_create_task(
+                runner(
+                    "rescan_local",
+                    {
+                        "rescan_local": True,
+                        CONF_SEND_EMAIL: False,
+                        CONF_GENERATE_PDF: False,
+                        **extra,
+                    },
+                )
+            )
+        elif action == "test_stored":
+            self.hass.async_create_task(
+                runner(
+                    "test_stored",
+                    {
+                        "test_stored": True,
+                        "rescan_local": True,
+                        CONF_FUB_ENABLED: False,
+                        CONF_FUB_VERIFY_ONLY: False,
+                        CONF_SEND_EMAIL: False,
+                        CONF_GENERATE_PDF: False,
+                        **extra,
+                    },
+                )
+            )
+        elif action == "push_stored_fub":
+            settings = _merged(entry)
+            if not str(settings.get(CONF_FUB_API_KEY) or "").strip():
+                payload, status = _api_error("Set the Follow Up Boss API key first.")
+                return self.json(payload, status_code=status)
+            self.hass.async_create_task(
+                runner(
+                    "push_stored_fub",
+                    {
+                        "push_stored_fub": True,
+                        CONF_FUB_ENABLED: True,
+                        CONF_FUB_VERIFY_ONLY: False,
+                        CONF_SEND_EMAIL: False,
+                        CONF_GENERATE_PDF: False,
+                        **extra,
+                    },
+                )
+            )
+        elif action == "rescan_go":
+            self.hass.async_create_task(
+                runner(
+                    "rescan_go",
+                    {
+                        "rescan_go": True,
+                        CONF_FUB_VERIFY_ONLY: False,
+                        CONF_SEND_EMAIL: False,
+                        CONF_GENERATE_PDF: False,
+                        **extra,
+                    },
+                )
+            )
+        elif action == "local_audit":
+            self.hass.async_create_task(
+                runner(
+                    "local_audit",
+                    {
+                        "local_audit": True,
+                        CONF_FUB_ENABLED: False,
+                        CONF_FUB_VERIFY_ONLY: False,
+                        CONF_SEND_EMAIL: False,
+                        CONF_GENERATE_PDF: False,
+                        **extra,
+                    },
+                )
+            )
+        else:
+            self.hass.async_create_task(runner("panel", extra or None))
+        return self.json({"ok": True, "started": True, "action": action})
+
+
+class StoredDocsView(HomeAssistantView):
+    url = "/api/placer_probate_monitor/stored_docs"
+    name = "api:placer_probate_monitor:stored_docs"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.hass = hass
+
+    async def get(self, request):
+        payload = await self.hass.async_add_executor_job(
+            _stored_docs_payload, self.hass, request.query.get("source_id")
+        )
+        return self.json(payload)
+
+
+def _stored_docs_payload(hass: HomeAssistant, source_id: str | None) -> dict:
+    data_dir = Path(hass.config.path(DOMAIN))
+    payload = all_stored_docs_inventory(data_dir)
+    wanted = str(source_id or "").strip().lower()
+    if wanted in {"placer", "sacramento"}:
+        payload["counties"] = [
+            item for item in payload.get("counties") or [] if item.get("id") == wanted
+        ]
+        payload["case_count"] = sum(
+            int(item.get("case_count") or 0) for item in payload["counties"]
+        )
+        payload["pdf_count"] = sum(
+            int(item.get("pdf_count") or 0) for item in payload["counties"]
+        )
+        payload["download_zip"] = f"{STORED_DOCS_ZIP_URL}?source_id={wanted}"
+    return payload
+
+
+class StoredDocsZipView(HomeAssistantView):
+    url = "/api/placer_probate_monitor/stored_docs/zip"
+    name = "api:placer_probate_monitor:stored_docs_zip"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.hass = hass
+
+    async def get(self, request):
+        wanted = str(request.query.get("source_id") or "").strip().lower()
+        if wanted and wanted not in {"placer", "sacramento"}:
+            payload, status = _api_error("Unknown data source.")
+            return self.json(payload, status_code=status)
+        source_id = wanted or None
+
+        def _build() -> bytes:
+            return build_stored_pdfs_zip(
+                Path(self.hass.config.path(DOMAIN)), source_id
+            )
+
+        blob = await self.hass.async_add_executor_job(_build)
+        if not blob:
+            payload, status = _api_error("No stored PDFs found.", status=404)
+            return self.json(payload, status_code=status)
+        filename = (
+            f"probate-stored-pdfs-{wanted}.zip"
+            if wanted
+            else "probate-stored-pdfs.zip"
+        )
+        return web.Response(
+            body=blob,
+            content_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+
+class StoredDocsFileView(HomeAssistantView):
+    url = "/api/placer_probate_monitor/stored_docs/file"
+    name = "api:placer_probate_monitor:stored_docs_file"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.hass = hass
+
+    async def get(self, request):
+        source_id = str(request.query.get("source_id") or "").strip().lower()
+        case = str(request.query.get("case") or "").strip()
+        name = str(request.query.get("name") or "").strip()
+        path = await self.hass.async_add_executor_job(
+            resolve_stored_pdf_file,
+            Path(self.hass.config.path(DOMAIN)),
+            source_id,
+            case,
+            name,
+        )
+        if not path:
+            payload, status = _api_error("not found", status=404)
+            return self.json(payload, status_code=status)
+        return FileResponse(
+            path,
+            headers={
+                "Content-Type": "application/pdf",
+                "Content-Disposition": f'attachment; filename="{path.name}"',
+            },
+        )
+
+
+class LogsView(HomeAssistantView):
+    url = HA_LOGS_URL
+    name = HA_LOGS_VIEW_NAME
+    requires_auth = HA_LOGS_REQUIRES_AUTH
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.hass = hass
+
+    async def get(self, request):
+        wanted = str(request.query.get("source_id") or "").strip().lower()
+        if wanted and wanted not in {"placer", "sacramento"}:
+            payload, status = _api_error("Unknown data source.")
+            return self.json(payload, status_code=status)
+        max_bytes = request.query.get("max_bytes")
+
+        def _build() -> dict:
+            return build_ha_logs_payload(
+                Path(self.hass.config.path(DOMAIN)),
+                source_id=wanted or None,
+                max_bytes=max_bytes,
+            )
+
+        payload = await self.hass.async_add_executor_job(_build)
+        return self.json(payload)
+
+
+class ListingsView(HomeAssistantView):
+    url = "/api/placer_probate_monitor/listings"
+    name = "api:placer_probate_monitor:listings"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.hass = hass
+
+    async def get(self, request):
+        # Resolve Nabu Casa on the event loop. Importing the cloud integration
+        # inside the listings executor can miss the live remote UI URL and
+        # leave document hrefs on the LAN address that opened this page.
+        hinted = _request_nabu_hint(self.hass, request)
+        payload = await self.hass.async_add_executor_job(
+            _listings_payload, self.hass, hinted
+        )
+        payload.update(_listings_share_meta(self.hass))
+        return self.json(payload)
+
+
+class AffidavitsView(HomeAssistantView):
+    """Cached dual-affidavit sweep results (read-only)."""
+
+    url = "/api/placer_probate_monitor/affidavits"
+    name = "api:placer_probate_monitor:affidavits"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.hass = hass
+
+    async def get(self, request):
+        payload = await self.hass.async_add_executor_job(
+            _affidavits_payload, self.hass
+        )
+        return self.json(payload)
+
+
+class ListingsCsvView(HomeAssistantView):
+    url = "/api/placer_probate_monitor/listings.csv"
+    name = "api:placer_probate_monitor:listings_csv"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.hass = hass
+
+    async def get(self, request):
+        return await _export_file(
+            self, request, _listings_export_bytes, "csv", "probate-listings.csv"
+        )
+
+
+class ListingsXlsxView(HomeAssistantView):
+    url = "/api/placer_probate_monitor/listings.xlsx"
+    name = "api:placer_probate_monitor:listings_xlsx"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.hass = hass
+
+    async def get(self, request):
+        return await _export_file(
+            self, request, _listings_export_bytes, "xlsx", "probate-listings.xlsx"
+        )
+
+
+class FubReviewCsvView(HomeAssistantView):
+    url = "/api/placer_probate_monitor/fub_review.csv"
+    name = "api:placer_probate_monitor:fub_review_csv"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.hass = hass
+
+    async def get(self, request):
+        return await _export_file(
+            self, request, _fub_review_export_bytes, "csv", "fub-review.csv"
+        )
+
+
+class FubReviewXlsxView(HomeAssistantView):
+    url = "/api/placer_probate_monitor/fub_review.xlsx"
+    name = "api:placer_probate_monitor:fub_review_xlsx"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.hass = hass
+
+    async def get(self, request):
+        return await _export_file(
+            self, request, _fub_review_export_bytes, "xlsx", "fub-review.xlsx"
+        )
+
+
+def _request_nabu_hint(hass: HomeAssistant, request) -> str:
+    from .document_base import peek_nabu_casa_origin
+
+    request_url = ""
+    try:
+        request_url = str(request.url)
+    except Exception:  # noqa: BLE001
+        request_url = ""
+    return peek_nabu_casa_origin(hass, request_url)
+
+
+def _nabu_document_origin(hass: HomeAssistant, hinted: str = "") -> tuple[str, str]:
+    from .document_base import apply_document_base, discover_nabu_origin
+
+    apply_document_base(hass, hinted)
+    origin, error = discover_nabu_origin(hass, hinted)
+    if error:
+        _LOGGER.warning("Probate listing documents: %s", error)
+    return origin, error
+
+
+def _listings_payload(hass: HomeAssistant, hinted: str = "") -> dict:
+    from .placer_probate_monitor import build_listings_payload
+
+    origin, error = _nabu_document_origin(hass, hinted)
+    payload = build_listings_payload(
+        Path(hass.config.path(DOMAIN)), document_base=origin
+    )
+    payload["document_base"] = origin
+    payload["document_base_error"] = error
+    return payload
+
+
+def _affidavits_payload(hass: HomeAssistant) -> dict:
+    from .affidavits import build_affidavits_payload
+
+    return build_affidavits_payload(Path(hass.config.path(DOMAIN)))
+
+
+def _listings_export_bytes(hass: HomeAssistant, query, fmt: str) -> bytes:
+    from .placer_probate_monitor import (
+        build_listings_payload,
+        filter_listings,
+        listings_csv_bytes,
+        listings_xlsx_bytes,
+    )
+
+    origin, _error = _nabu_document_origin(hass)
+    payload = build_listings_payload(
+        Path(hass.config.path(DOMAIN)), document_base=origin
+    )
+    rows = filter_listings(
+        payload.get("listings") or [],
+        query=str(query.get("q") or ""),
+        source_id=str(query.get("source_id") or ""),
+        fub_status=str(query.get("fub_status") or ""),
+    )
+    if fmt == "xlsx":
+        return listings_xlsx_bytes(rows)
+    return listings_csv_bytes(rows)
+
+
+def _fub_review_export_bytes(hass: HomeAssistant, query, fmt: str) -> bytes:
+    from .placer_probate_monitor import (
+        build_listings_payload,
+        filter_listings,
+        fub_review_csv_bytes,
+        fub_review_xlsx_bytes,
+    )
+
+    data_dir = Path(hass.config.path(DOMAIN))
+    origin, _error = _nabu_document_origin(hass)
+    payload = build_listings_payload(data_dir, document_base=origin)
+    rows = filter_listings(
+        payload.get("listings") or [],
+        query=str(query.get("q") or ""),
+        source_id=str(query.get("source_id") or ""),
+        fub_status=str(query.get("fub_status") or ""),
+    )
+    mapping_path = data_dir / "fub_mapping.yaml"
+    if fmt == "xlsx":
+        return fub_review_xlsx_bytes(rows, mapping_path=mapping_path)
+    return fub_review_csv_bytes(rows, mapping_path=mapping_path)
+
+
+def _external_base(hass: HomeAssistant) -> str:
+    try:
+        from homeassistant.helpers.network import get_url
+
+        base = str(get_url(hass, prefer_external=True) or "").rstrip("/")
+        if base:
+            return base
+    except Exception:  # noqa: BLE001
+        pass
+    config = getattr(hass, "config", None)
+    for attr in ("external_url", "internal_url"):
+        value = str(getattr(config, attr, None) or "").rstrip("/")
+        if value:
+            return value
+    return ""
+
+
+def _listings_share_meta(hass: HomeAssistant) -> dict:
+    entry = _entry(hass)
+    return listings_share_payload(
+        _external_base(hass),
+        entry.entry_id if entry else None,
+    )
+
+
+def _listing_text(value, fallback: str = "—") -> str:
+    if value is None or value is False:
+        return fallback
+    if hasattr(value, "isoformat") and not isinstance(value, (str, bytes)):
+        try:
+            value = value.isoformat()
+        except Exception:  # noqa: BLE001
+            pass
+    text = str(value).strip()
+    return text or fallback
+
+
+def _listing_docs_cell(row: dict) -> str:
+    if not isinstance(row, dict):
+        return "—"
+    items = []
+    raw = row.get("docs")
+    if isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("label") or "").strip()
+            url = str(item.get("url") or "").strip()
+            if label and url:
+                items.append((label, url))
+    if not items:
+        for label, key in (("DE-111", "de111_url"), ("DE-147", "de147_url")):
+            url = str(row.get(key) or "").strip()
+            if url:
+                items.append((label, url))
+    if not items:
+        return "—"
+    return " · ".join(
+        f'<a href="{html.escape(url)}" target="_blank" rel="noopener">{html.escape(label)}</a>'
+        for label, url in items
+    )
+
+
+def _listing_go_cell(row: dict) -> str:
+    if not isinstance(row, dict):
+        return "—"
+    status = str(row.get("go_status") or "").strip()
+    if status.upper() == "GO":
+        return '<span class="ppm-pill live">GO</span>'
+    if status.upper().replace(" ", "") in {"NO-GO", "NOGO"}:
+        return '<span class="ppm-pill off">NO-GO</span>'
+    return html.escape(status or "—")
+
+
+def _listing_go_reason_cell(row: dict) -> str:
+    if not isinstance(row, dict):
+        return "—"
+    reason = str(row.get("nogo_reason_label") or row.get("nogo_reason") or "").strip()
+    if reason == "path_a":
+        reason = "Path A"
+    elif reason == "path_b":
+        reason = "Path B"
+    return html.escape(reason or "—")
+
+
+def _listing_fub_cell(row: dict) -> str:
+    if not isinstance(row, dict):
+        return '<span class="ppm-pill">no id</span>'
+    status = str(row.get("fub_status") or "")
+    if status == "deleted" or row.get("fub_removed"):
+        return '<span class="ppm-pill off">deleted</span>'
+    if status == "id":
+        label = html.escape(
+            _listing_text(row.get("fub_status_label") or row.get("fub_person_id"), "ID")
+        )
+        return f'<span class="ppm-pill live">{label}</span>'
+    return '<span class="ppm-pill">no id</span>'
+
+
+def _listings_public_html(payload: dict) -> str:
+    payload = payload if isinstance(payload, dict) else {}
+    rows = [row for row in (payload.get("listings") or []) if isinstance(row, dict)]
+    body_rows = []
+    for row in rows:
+        case = html.escape(_listing_text(row.get("case_number"), ""))
+        notice = _listing_text(row.get("notice_url"), "").strip()
+        case_cell = (
+            f'<a href="{html.escape(notice)}" target="_blank" rel="noopener">{case}</a>'
+            if notice
+            else case or "—"
+        )
+        petitioner = html.escape(_listing_text(row.get("petitioner")))
+        petitioner_addr = html.escape(_listing_text(row.get("petitioner_address"), ""))
+        addr_note = f'<div class="ppm-note">{petitioner_addr}</div>' if petitioner_addr else ""
+        body_rows.append(
+            "<tr>"
+            f"<td>{html.escape(_listing_text(row.get('date') or row.get('filed')))}</td>"
+            f"<td>{html.escape(_listing_text(row.get('added_at')))}</td>"
+            f"<td>{html.escape(_listing_text(row.get('source'), 'Placer County'))}</td>"
+            f"<td>{case_cell}</td>"
+            f"<td>{_listing_docs_cell(row)}</td>"
+            f"<td>{_listing_go_cell(row)}</td>"
+            f"<td>{_listing_go_reason_cell(row)}</td>"
+            f"<td>{petitioner}{addr_note}</td>"
+            f"<td>{html.escape(_listing_text(row.get('decedent')))}</td>"
+            f"<td>{html.escape(_listing_text(row.get('decedent_address')))}</td>"
+            f"<td>{html.escape(_listing_text(row.get('hearing')))}</td>"
+            f"<td>{html.escape(_listing_text(row.get('estate_real'), ''))}</td>"
+            f"<td>{'Yes' if row.get('petition_ocr') else '—'}</td>"
+            f"<td>{_listing_fub_cell(row)}</td>"
+            "</tr>"
+        )
+    table = (
+        """<div class="ppm-table-wrap"><table>
+        <thead><tr>
+          <th>Date</th><th>Added</th><th>Source</th><th>Case</th>
+          <th>Documents</th>
+          <th>GO/NO-GO</th><th>Status</th>
+          <th>Petitioner</th><th>Decedent</th><th>Decedent address</th>
+          <th>Hearing</th><th>estate_real</th><th>OCR</th><th>Listings Status</th>
+        </tr></thead>
+        <tbody>"""
+        + "".join(body_rows)
+        + "</tbody></table></div>"
+        if body_rows
+        else "<p class='ppm-note'>No collected listings yet.</p>"
+    )
+    count = len(rows)
+    count_label = f"{count} listing" + ("" if count == 1 else "s")
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Probate listings</title>
+  <style>
+    body {{ font: 15px/1.45 "Segoe UI", system-ui, sans-serif; color: #1c1915; background: #f7f3ec; margin: 0; }}
+    header {{ background: #1b2a4a; color: #f7f3ec; padding: 20px 24px; }}
+    header p {{ margin: 4px 0 0; color: #c9c3b8; font-size: 13px; }}
+    h1 {{ margin: 0; font-size: 22px; }}
+    main {{ padding: 20px; max-width: 1440px; }}
+    .ppm-card {{ background: #fffdf8; border: 1px solid #ddd6cc; border-radius: 10px; padding: 16px 18px; }}
+    .ppm-note {{ color: #6b645b; font-size: 12px; margin-top: 8px; }}
+    table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
+    th, td {{ text-align: left; padding: 8px 6px; border-bottom: 1px solid #ddd6cc; vertical-align: top; }}
+    a {{ color: #1b2a4a; word-break: break-all; }}
+    .ppm-pill {{ display: inline-block; padding: 2px 8px; border-radius: 999px; background: #ece7de; font-size: 11px; }}
+    .ppm-pill.live {{ background: #e7f4ec; color: #2d6a4f; }}
+    .ppm-pill.off {{ background: #f8e8e8; color: #8b2e2e; }}
+    .ppm-table-wrap {{ overflow-x: auto; }}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Probate listings</h1>
+    <p>Shared view. Date is the newspaper notice date. GO/NO-GO and Status are the harvest gate. Listings Status shows Follow Up Boss person id, no id, or deleted.</p>
+  </header>
+  <main>
+    <section class="ppm-card">
+      <p class="ppm-note">{html.escape(count_label)}</p>
+      {table}
+    </section>
+  </main>
+</body>
+</html>
+"""
+
+
+class ListingsPublicView(HomeAssistantView):
+    url = LISTINGS_SHARE_PATH
+    name = "api:placer_probate_monitor:listings_public"
+    requires_auth = False
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.hass = hass
+
+    async def get(self, request):
+        entry = _entry(self.hass)
+        status = listings_share_status(
+            request.query.get("token"),
+            entry.entry_id if entry else None,
+            exp=request.query.get("exp"),
+        )
+        if status:
+            payload, code = listings_share_http_error(status)
+            return self.json(payload, status_code=code)
+        hinted = _request_nabu_hint(self.hass, request)
+        data = await self.hass.async_add_executor_job(
+            _listings_payload, self.hass, hinted
+        )
+        want_json = str(request.query.get("format") or "").lower() == "json" or (
+            "application/json" in str(request.headers.get("Accept") or "").lower()
+            and "text/html" not in str(request.headers.get("Accept") or "").lower()
+        )
+        if want_json:
+            return self.json({"count": data.get("count"), "listings": data.get("listings") or []})
+        # aiohttp raises ValueError if charset is embedded in content_type with text=.
+        return web.Response(
+            text=_listings_public_html(data),
+            content_type="text/html",
+            headers={"Cache-Control": "no-store"},
+        )
+
+
+def _register_panel(hass: HomeAssistant, url_path: str, title: str, icon: str, element: str) -> None:
+    config = {
+        "_panel_custom": {
+            "name": element,
+            "embed_iframe": True,
+            "trust_external": False,
+            "js_url": f"/api/placer_probate_monitor/panel.js?v={PANEL_JS_VERSION}",
+        }
+    }
+    kwargs = {
+        "component_name": "custom",
+        "sidebar_title": title,
+        "sidebar_icon": icon,
+        "frontend_url_path": url_path,
+        "config": config,
+        "require_admin": False,
+    }
+    try:
+        frontend.async_register_built_in_panel(hass, **kwargs, update=True)
+    except TypeError:
+        try:
+            frontend.async_remove_panel(hass, url_path)
+        except Exception:  # noqa: BLE001
+            pass
+        frontend.async_register_built_in_panel(hass, **kwargs)
+
+
+def _mapping_http_views(hass: HomeAssistant) -> list:
+    # Register /listings/public before /listings so aiohttp cannot treat the
+    # public share path as a missing subroute of the authenticated list.
+    return [
+        FubMapPageView(),
+        FubPanelJsView(),
+        FubMappingView(hass),
+        FubPersonView(hass),
+        FubNotesCleanupView(hass),
+        SourcesView(hass),
+        FubSettingsView(hass),
+        PetitionPdfView(hass),
+        DutiesPdfView(hass),
+        LettersPdfView(hass),
+        JobView(hass),
+        StoredDocsView(hass),
+        StoredDocsZipView(hass),
+        StoredDocsFileView(hass),
+        LogsView(hass),
+        ListingsPublicView(hass),
+        ListingsCsvView(hass),
+        ListingsXlsxView(hass),
+        FubReviewCsvView(hass),
+        FubReviewXlsxView(hass),
+        ListingsView(hass),
+        AffidavitsView(hass),
+    ]
+
+
+def _register_http_view(hass: HomeAssistant, view) -> None:
+    http = getattr(hass, "http", None)
+    register = getattr(http, "register_view", None)
+    if register is None:
+        return
+    try:
+        register(view)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def async_setup_mapping_views(hass: HomeAssistant) -> None:
+    hass.data.setdefault(DOMAIN, {})
+    for view in _mapping_http_views(hass):
+        _register_http_view(hass, view)
+    hass.data[DOMAIN]["_fub_views"] = True
+
+
+def async_setup_mapping_ui(hass: HomeAssistant) -> None:
+    async_setup_mapping_views(hass)
+    for path in (PANEL_FUB_PATH, PANEL_SOURCES_PATH, PANEL_LISTINGS_PATH):
+        try:
+            frontend.async_remove_panel(hass, path)
+        except Exception:  # noqa: BLE001
+            pass
+    _register_panel(
+        hass,
+        PANEL_HOME_PATH,
+        "Hammond Realty",
+        "mdi:home-city",
+        "hammond-realty-panel",
+    )
+
+
+def async_unload_mapping_ui(hass: HomeAssistant) -> None:
+    for path in PANEL_PATHS:
+        try:
+            frontend.async_remove_panel(hass, path)
+        except Exception:  # noqa: BLE001
+            pass
