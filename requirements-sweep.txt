@@ -1,0 +1,6 @@
+# Dual affidavit sweep (optional extras on top of requirements.txt)
+requests>=2.31.0
+aiohttp>=3.9.0
+playwright>=1.40.0
+rapidocr-onnxruntime>=1.3.0
+pytest>=8.0.0

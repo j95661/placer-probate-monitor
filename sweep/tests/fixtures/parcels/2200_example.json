@@ -1,0 +1,15 @@
+{
+  "query": "StreetNum=2200 AND UPPER(StreetName) LIKE '%EXAMPLE%'",
+  "address": "2200 Example Road, Roseville, CA",
+  "features": [
+    {
+      "attributes": {
+        "Apn": "471-320-024-000",
+        "SitusAddressFull": "2200 EXAMPLE RD, ROSEVILLE, CA 95661",
+        "LandValue": "180000",
+        "Structure": "390000",
+        "Jurisdiction": "ROSEVILLE"
+      }
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "query": "StreetNum=412 AND UPPER(StreetName) LIKE '%MAPLE%'",
+  "address": "412 Maple Court, Auburn, Placer County, CA",
+  "features": [
+    {
+      "attributes": {
+        "Apn": "001-062-015-000",
+        "SitusAddressFull": "412 MAPLE CT, AUBURN, CA 95603",
+        "LandValue": "120000",
+        "Structure": "280000",
+        "Jurisdiction": "AUBURN"
+      }
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "query": "LASATER",
+  "truncated": false,
+  "page_count": 1,
+  "rows": [
+    {
+      "doc_number": "2025-0072761-00",
+      "names": "LASATER, ROBERT E / LASATER FAMILY TRUST",
+      "other_party": "",
+      "doc_type": "AFFIDAVIT OF DEATH OF TRUSTEE",
+      "record_date": "09/15/2025"
+    },
+    {
+      "doc_number": "2025-0072762-00",
+      "names": "LASATER FAMILY TRUST",
+      "other_party": "LASATER, JANE",
+      "doc_type": "AFFIDAVIT OF SUCCESSOR TRUSTEE",
+      "record_date": "09/15/2025"
+    },
+    {
+      "doc_number": "2026-0015534-00",
+      "names": "LASATER, MARY / LASATER FAMILY TRUST",
+      "other_party": "",
+      "doc_type": "AFFIDAVIT OF DEATH OF TRUSTEE",
+      "record_date": "03/02/2026"
+    },
+    {
+      "doc_number": "2026-0015535-00",
+      "names": "LASATER FAMILY TRUST",
+      "other_party": "LASATER, JANE",
+      "doc_type": "AFFIDAVIT OF SUCCESSOR TRUSTEE",
+      "record_date": "03/02/2026"
+    },
+    {
+      "doc_number": "2020-0001111-00",
+      "names": "LASATER, ROBERT E",
+      "other_party": "LASATER, MARY",
+      "doc_type": "TRUST TRANSFER DEED",
+      "record_date": "01/10/2020"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "query": "StreetNum=55 AND UPPER(StreetName) LIKE '%OAK%'",
+  "address": "55 Oak Drive, Rocklin, CA",
+  "features": [
+    {
+      "attributes": {
+        "Apn": "123-456-789-000",
+        "SitusAddressFull": "55 OAK DR, ROCKLIN, CA 95677",
+        "LandValue": "90000",
+        "Structure": "210000",
+        "Jurisdiction": "ROCKLIN"
+      }
+    }
+  ]
+}

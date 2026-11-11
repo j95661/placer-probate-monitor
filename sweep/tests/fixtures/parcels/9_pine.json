@@ -1,0 +1,15 @@
+{
+  "query": "StreetNum=9 AND UPPER(StreetName) LIKE '%PINE%'",
+  "address": "9 Pine Lane, Loomis, CA",
+  "features": [
+    {
+      "attributes": {
+        "Apn": "999-888-777-000",
+        "SitusAddressFull": "9 PINE LN, LOOMIS, CA 95650",
+        "LandValue": "70000",
+        "Structure": "150000",
+        "Jurisdiction": "LOOMIS"
+      }
+    }
+  ]
+}
