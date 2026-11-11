@@ -150,6 +150,20 @@ What is different from Placer:
 
 The PDF, text digest, HTML table, and dossier JSON use the same fields as Placer: decedent, petitioner, hearing, will / IAEA, counsel, parties, hearings, document titles, and the court link.
 
+## Dual Affidavit of Death sweep
+
+Standalone read-only CLI (`python -m sweep`) plus HA panel integration
+(v1.3.157+): Dual signals column, `/api/placer_probate_monitor/affidavits`,
+and `placer_probate_monitor.affidavit_sweep` (at most daily). See
+[`sweep/README.md`](sweep/README.md).
+
+```bash
+pip install -r requirements.txt
+python -m sweep run --fixtures sweep/tests/fixtures   # offline / CI
+python -m sweep run                                   # live (needs HA_TOKEN)
+PYTHONPATH=. pytest -q sweep/tests
+```
+
 ## Datasource for Home Assistant / Follow Up Boss
 
 `datasources.collect_leads` is the import the Home Assistant and Follow Up Boss app should call. It does not email and it does not update the seen-case tracker.

@@ -1,0 +1,21 @@
+{
+  "query": "ASSENZA",
+  "truncated": false,
+  "page_count": 1,
+  "rows": [
+    {
+      "doc_number": "2026-0030505-00",
+      "names": "ASSENZA FAMILY TRUST",
+      "other_party": "ASSENZA, JOSEPH",
+      "doc_type": "AFFIDAVIT OF SUCCESSOR TRUSTEE",
+      "record_date": "04/15/2026"
+    },
+    {
+      "doc_number": "2018-0002222-00",
+      "names": "ASSENZA, FRANK",
+      "other_party": "ASSENZA, MARIA",
+      "doc_type": "TRUST TRANSFER DEED",
+      "record_date": "06/01/2018"
+    }
+  ]
+}

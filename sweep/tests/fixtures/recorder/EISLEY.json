@@ -1,0 +1,63 @@
+{
+  "query": "EISLEY",
+  "truncated": false,
+  "page_count": 1,
+  "rows": [
+    {
+      "doc_number": "2022-0014623-00",
+      "names": "EISLEY, JOHN A / EISLEY FAMILY TRUST DATED 05/01/1998",
+      "other_party": "",
+      "doc_type": "AFFIDAVIT OF DEATH OF TRUSTEE",
+      "record_date": "03/01/2022"
+    },
+    {
+      "doc_number": "2022-0014625-00",
+      "names": "EISLEY FAMILY TRUST DATED 05/01/1998",
+      "other_party": "",
+      "doc_type": "AFFIDAVIT OF DEATH",
+      "record_date": "03/01/2022"
+    },
+    {
+      "doc_number": "2022-0014631-00",
+      "names": "EISLEY, JOHN A",
+      "other_party": "",
+      "doc_type": "AFFIDAVIT OF DEATH OF JOINT TENANT",
+      "record_date": "03/02/2022"
+    },
+    {
+      "doc_number": "2022-0014635-00",
+      "names": "EISLEY FAMILY TRUST",
+      "other_party": "",
+      "doc_type": "AFFIDAVIT OF DEATH",
+      "record_date": "03/02/2022"
+    },
+    {
+      "doc_number": "2022-0014637-00",
+      "names": "EISLEY, JOHN",
+      "other_party": "",
+      "doc_type": "AFFIDAVIT OF DEATH",
+      "record_date": "03/03/2022"
+    },
+    {
+      "doc_number": "2022-0014643-00",
+      "names": "EISLEY FAMILY TRUST DATED 05/01/1998",
+      "other_party": "",
+      "doc_type": "AFFIDAVIT OF DEATH OF TRUSTEE",
+      "record_date": "03/03/2022"
+    },
+    {
+      "doc_number": "2022-0091025-00",
+      "names": "EISLEY, JOHN A / EISLEY FAMILY TRUST",
+      "other_party": "",
+      "doc_type": "AFFIDAVIT OF DEATH",
+      "record_date": "11/20/2022"
+    },
+    {
+      "doc_number": "2023-0004968-00",
+      "names": "EISLEY, DEBORAH / EISLEY FAMILY TRUST DATED 05/01/1998",
+      "other_party": "",
+      "doc_type": "AFFIDAVIT OF DEATH OF TRUSTEE",
+      "record_date": "04/01/2023"
+    }
+  ]
+}

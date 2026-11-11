@@ -1,0 +1,21 @@
+{
+  "query": "WATKINS",
+  "truncated": false,
+  "page_count": 1,
+  "rows": [
+    {
+      "doc_number": "2026-0058037-00",
+      "names": "ESTATE OF WATKINS, HELEN / EXECUTOR TOM WATKINS",
+      "other_party": "SMITH, BUYER",
+      "doc_type": "EXECUTOR DEED",
+      "record_date": "08/01/2026"
+    },
+    {
+      "doc_number": "2015-0003333-00",
+      "names": "WATKINS, HELEN",
+      "other_party": "",
+      "doc_type": "GRANT DEED",
+      "record_date": "02/02/2015"
+    }
+  ]
+}

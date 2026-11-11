@@ -1,0 +1,15 @@
+{
+  "query": "StreetNum=138 AND UPPER(StreetName) LIKE '%PALM%'",
+  "address": "138 Palm Avenue, Auburn, CA",
+  "features": [
+    {
+      "attributes": {
+        "Apn": "001-032-006-000",
+        "SitusAddressFull": "138 PALM AVE, AUBURN, CA 95603",
+        "LandValue": "200000",
+        "Structure": "450000",
+        "Jurisdiction": "AUBURN"
+      }
+    }
+  ]
+}
